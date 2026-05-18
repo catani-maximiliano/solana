@@ -1,7 +1,8 @@
 import { priceGraph, MarketSurfaceEntry } from "../graph";
-import { SurfaceReport } from "./types";
+import { SurfaceReport, SurfacePoolEntry } from "./types";
 import { slippageEstimator } from "./slippage-estimator";
-import { logDebug, logSuccess, logInfo } from "../logger";
+import { edgeQualityScorer } from "./edge-quality";
+import { logSuccess, logInfo } from "../logger";
 
 const SURFACE_CACHE_TTL = 5_000;
 
@@ -23,9 +24,15 @@ function computeExecutableSpreadBps(bestBid: number, bestAsk: number, pools: Mar
   const avgFee = pools
     .filter((p) => p.health === "VALID" && p.price > 0)
     .reduce((s, p) => s + p.fee, 0) / Math.max(1, pools.filter((p) => p.health === "VALID" && p.price > 0).length);
-  const feeCostBps = avgFee * 2;
-  const netSpreadBps = grossSpreadBps - feeCostBps;
-  return Math.max(0, netSpreadBps);
+  return Math.max(0, grossSpreadBps - avgFee * 2);
+}
+
+function liquidityLabel(liq: number): string {
+  if (liq >= 50_000_000) return "VERY_HIGH";
+  if (liq >= 10_000_000) return "HIGH";
+  if (liq >= 1_000_000) return "MEDIUM";
+  if (liq >= 100_000) return "LOW";
+  return "VERY_LOW";
 }
 
 export class MarketSurfaceEngine {
@@ -53,8 +60,26 @@ export class MarketSurfaceEngine {
     const spreadBps = bestBid > 0 ? ((bestAsk - bestBid) / bestBid) * 10000 : 0;
     const weightedMid = calcWeightedMid(validPools);
     const executableSpreadBps = computeExecutableSpreadBps(bestBid, bestAsk, validPools);
-
     const avgAge = validPools.reduce((s, p) => s + p.age, 0) / validPools.length;
+
+    const poolsWithDepth: SurfacePoolEntry[] = validPools.map((p) => {
+      const depthProfile = slippageEstimator.computeDepthProfile(p.poolAddress) || undefined;
+      const qualityScore = edgeQualityScorer.getQuality(p.poolAddress, p.age, p.liquidity);
+      return {
+        poolAddress: p.poolAddress,
+        dex: p.dex,
+        price: p.price,
+        liquidity: p.liquidity,
+        fee: p.fee,
+        health: p.health,
+        age: p.age,
+        slot: p.slot,
+        decimalsA: p.decimalsA,
+        decimalsB: p.decimalsB,
+        depthProfile,
+        qualityScore,
+      };
+    });
 
     const report: SurfaceReport = {
       pair,
@@ -68,34 +93,19 @@ export class MarketSurfaceEngine {
       spreadBps,
       executableSpreadBps,
       weightedMid,
-      pools: validPools.map((p) => ({
-        poolAddress: p.poolAddress,
-        dex: p.dex,
-        price: p.price,
-        liquidity: p.liquidity,
-        fee: p.fee,
-        health: p.health,
-        age: p.age,
-        slot: p.slot,
-        decimalsA: p.decimalsA,
-        decimalsB: p.decimalsB,
-      })),
+      pools: poolsWithDepth,
       freshness: Math.max(0, 1 - avgAge / 10_000),
       updatedAt: Date.now(),
     };
 
     this.cache.set(pair, { ...report, cachedAt: Date.now() });
     this.calculationCount++;
-
     return report;
   }
 
   invalidateCache(pair?: string): void {
-    if (pair) {
-      this.cache.delete(pair);
-    } else {
-      this.cache.clear();
-    }
+    if (pair) this.cache.delete(pair);
+    else this.cache.clear();
   }
 
   printSurfaceReport(pair: string): void {
@@ -105,20 +115,30 @@ export class MarketSurfaceEngine {
       return;
     }
 
-    logSuccess(`========== SURFACE ENGINE: ${pair} ==========`);
-    logInfo(`bestBid: $${report.bestBid.toFixed(6)} (${report.bestBidVenue})`);
-    logInfo(`bestAsk: $${report.bestAsk.toFixed(6)} (${report.bestAskVenue})`);
+    const avgLiq = report.pools.reduce((s, p) => s + p.liquidity, 0) / report.pools.length;
+    const minAge = Math.min(...report.pools.map((p) => p.age));
+
+    logSuccess("══════════ MARKET SURFACE ══════════");
+    logInfo(`${pair}`);
+    logInfo(`Pools: ${report.pools.length}`);
+    logInfo("");
+    logInfo(`bestBuy:  ${report.bestBidVenue} @ $${report.bestBid.toFixed(6)}`);
+    logInfo(`bestSell: ${report.bestAskVenue} @ $${report.bestAsk.toFixed(6)}`);
+    logInfo("");
+    logInfo(`rawSpread: ${report.spreadBps.toFixed(2)} bps`);
+    logInfo(`executableSpread: ${report.executableSpreadBps.toFixed(2)} bps`);
+    logInfo("");
     logInfo(`midPrice: $${report.midPrice.toFixed(6)}`);
     logInfo(`weightedMid: $${report.weightedMid.toFixed(6)}`);
-    logInfo(`spread: ${report.spreadBps.toFixed(2)} bps`);
-    logInfo(`executableSpread: ${report.executableSpreadBps.toFixed(2)} bps`);
-    logInfo(`freshness: ${(report.freshness * 100).toFixed(0)}%`);
-    logInfo(`pools: ${report.pools.length}`);
-
+    logInfo(`liquidity: ${liquidityLabel(avgLiq)}`);
+    logInfo(`freshness: ${minAge}ms`);
+    logInfo("");
     for (const p of report.pools) {
-      logInfo(`  ${p.dex} | $${p.price.toFixed(6)} | liq: ${(p.liquidity / 1_000_000).toFixed(1)}M | fee: ${p.fee}bps`);
+      const depthNote = p.depthProfile ? `maxSize=${p.depthProfile.maxExecutableSize.toFixed(2)}SOL` : "";
+      const qualityNote = p.qualityScore ? `qscore=${(p.qualityScore.overall * 100).toFixed(0)}%` : "";
+      logInfo(`  ${p.dex} | $${p.price.toFixed(6)} | liq: ${(p.liquidity / 1_000_000).toFixed(1)}M | fee: ${p.fee}bps | ${depthNote} ${qualityNote}`);
     }
-    logSuccess("============================================");
+    logSuccess("════════════════════════════════════");
   }
 
   getStats() {

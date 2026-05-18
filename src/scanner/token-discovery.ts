@@ -55,6 +55,7 @@ export class TokenDiscovery {
 
   constructor() {
     this.seedKnownTokens();
+    this.buildPairs();
   }
 
   private seedKnownTokens(): void {

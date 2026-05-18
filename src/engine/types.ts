@@ -10,6 +10,9 @@ export interface ExecutableOpportunity {
   sellPrice: number;
   grossSpreadBps: number;
   netSpreadBps: number;
+  feesBps: number;
+  slippageBps: number;
+  impactBps: number;
   estimatedProfitUsd: number;
   estimatedProfitSol: number;
   totalFees: number;
@@ -17,9 +20,12 @@ export interface ExecutableOpportunity {
   impactCost: number;
   executableSize: number;
   optimalSize: number;
+  liquidityConfidence: number;
   confidence: number;
-  latencyRisk: "LOW" | "MEDIUM" | "HIGH";
+  latencyRisk: LatencyRisk;
   freshnessScore: number;
+  persistenceMs: number;
+  qualityScore: number;
   detectedAt: number;
 }
 
@@ -51,6 +57,8 @@ export interface SurfacePoolEntry {
   slot: number;
   decimalsA: number;
   decimalsB: number;
+  depthProfile?: DepthProfile;
+  qualityScore?: EdgeQualityScore;
 }
 
 export interface SwapSimulation {
@@ -60,6 +68,7 @@ export interface SwapSimulation {
   feeCost: number;
   totalCost: number;
   executable: boolean;
+  tickCrossing: boolean;
 }
 
 export interface OptimalTradeResult {
@@ -69,12 +78,52 @@ export interface OptimalTradeResult {
   sellSim: SwapSimulation;
 }
 
+export interface DepthProfile {
+  poolAddress: string;
+  dex: string;
+  price: number;
+  liquidity: number;
+  fee: number;
+  sizes: TradeSizePoint[];
+  maxExecutableSize: number;
+  impactAtMax: number;
+  depthScore: number;
+}
+
+export interface TradeSizePoint {
+  sizeSol: number;
+  priceImpact: number;
+  effectivePrice: number;
+  feeCost: number;
+}
+
+export interface EdgeQualityScore {
+  overall: number;
+  liquidity: number;
+  freshness: number;
+  updateCadence: number;
+  volatility: number;
+  stability: number;
+  slippageProfile: number;
+}
+
+export interface SpreadPersistence {
+  key: string;
+  firstSeen: number;
+  lastSeen: number;
+  lifetimeMs: number;
+  avgLifetimeMs: number;
+  sampleCount: number;
+  active: boolean;
+}
+
 export interface MicrostructureMetrics {
   edgeFreshness: number;
   updateCadence: number;
   volatility: number;
-  spreadPersistence: number;
+  spreadVariance: number;
   liquidityStability: number;
+  marketPressure: number;
 }
 
 export type LatencyRisk = "LOW" | "MEDIUM" | "HIGH";

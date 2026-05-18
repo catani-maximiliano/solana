@@ -13,7 +13,7 @@ import { WebSocketManager } from "./ws";
 import { marketState, WhirlpoolProvider } from "./market";
 import { pairState } from "./pair-state";
 import { priceGraph } from "./graph";
-import { surfaceEngine, executableDetector } from "./engine";
+import { surfaceEngine, executableDetector, printNetworkReport } from "./engine";
 import { eventScheduler } from "./scheduler";
 import { marketValidator } from "./market-validator";
 import { POOL_REGISTRY, getPoolSummary } from "./config/pools";
@@ -482,6 +482,7 @@ async function mainLoop(): Promise<void> {
 
         if (priceGraph.getEdgeCount() > 0) {
           priceGraph.printGraphSummary();
+          printNetworkReport();
           for (const label of priceGraph.getPairSurfaceLabels()) {
             surfaceEngine.printSurfaceReport(label);
           }
