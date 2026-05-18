@@ -13,6 +13,7 @@ import { WebSocketManager } from "./ws";
 import { marketState, WhirlpoolProvider } from "./market";
 import { pairState } from "./pair-state";
 import { priceGraph } from "./graph";
+import { surfaceEngine, executableDetector } from "./engine";
 import { eventScheduler } from "./scheduler";
 import { marketValidator } from "./market-validator";
 import { POOL_REGISTRY, getPoolSummary } from "./config/pools";
@@ -482,9 +483,14 @@ async function mainLoop(): Promise<void> {
         if (priceGraph.getEdgeCount() > 0) {
           priceGraph.printGraphSummary();
           for (const label of priceGraph.getPairSurfaceLabels()) {
-            priceGraph.printMarketSurface(label);
+            surfaceEngine.printSurfaceReport(label);
           }
         }
+
+        const engStats = executableDetector.getStats();
+        logInfo(`Engine: ${engStats.totalScans} scans, ${engStats.totalOpportunities} opps total, ${engStats.activeCandidates} activas`);
+        const surfStats = surfaceEngine.getStats();
+        logInfo(`Surface: ${surfStats.cachedSurfaces} surfaces cacheadas, ${surfStats.calculations} cálculos`);
 
         if (circuitBreaker.isDegraded()) {
           logWarning(`Circuit Breaker: DEGRADADO — ${circuitBreaker.getState().consecutiveFailures} fallos`);

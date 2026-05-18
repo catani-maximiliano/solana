@@ -36,6 +36,9 @@ export interface MarketSurfaceEntry {
   health: EdgeHealth;
   age: number;
   slot: number;
+  decimalsA: number;
+  decimalsB: number;
+  sqrtPriceX64: string;
 }
 
 export interface MarketSurface {
@@ -235,6 +238,7 @@ export class PriceGraph {
     for (const e of surfaceEdges) {
       const key = `${e.poolAddress}:${e.from}:${e.to}`;
       if (!poolMap.has(key)) {
+        const poolData = marketState.getPool(e.poolAddress);
         poolMap.set(key, {
           poolAddress: e.poolAddress,
           dex: e.dex,
@@ -244,6 +248,9 @@ export class PriceGraph {
           health: e.health,
           age: Date.now() - e.timestamp,
           slot: e.slot,
+          decimalsA: poolData?.decimalsA ?? 0,
+          decimalsB: poolData?.decimalsB ?? 0,
+          sqrtPriceX64: poolData?.sqrtPriceX64 ?? "0",
         });
       }
     }

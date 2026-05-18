@@ -1,9 +1,8 @@
 import { BotConfig } from "./config";
-import { logInfo, logSuccess, logWarning, logCrossDexPair, logSpread } from "./logger";
-import { eventBus } from "./events";
-import { priceGraph, PriceEdge, MarketSurface } from "./graph";
+import { logInfo, logSuccess } from "./logger";
 import { marketValidator } from "./market-validator";
-import { marketState } from "./market";
+import { executableDetector, surfaceEngine, ExecutableOpportunity } from "./engine";
+import { priceGraph } from "./graph";
 
 export interface LocalOpportunityCandidate {
   pair: string;
@@ -26,12 +25,33 @@ export interface ValidationResult {
   reason?: string;
 }
 
-const OPPORTUNITY_MIN_SPREAD_BPS = 1;
 const CONFIDENCE_MIN = 0.3;
 const LIQUIDITY_MIN = 1_000;
 const FRESHNESS_MAX_MS = 10_000;
 const CACHE_TTL_MS = 10_000;
 const MAX_CANDIDATES = 20;
+
+function oppToCandidate(opp: ExecutableOpportunity): LocalOpportunityCandidate {
+  return {
+    pair: opp.pair,
+    symbolA: opp.symbolA,
+    symbolB: opp.symbolB,
+    poolBuy: opp.buyPool,
+    poolSell: opp.sellPool,
+    dexBuy: opp.buyDex,
+    dexSell: opp.sellDex,
+    priceBuy: opp.buyPrice,
+    priceSell: opp.sellPrice,
+    spreadPct: opp.grossSpreadBps / 100,
+    liquidity: Math.min(
+      ...surfaceEngine.getSurface(opp.pair)?.pools
+        .filter((p) => [opp.buyPool, opp.sellPool].includes(p.poolAddress))
+        .map((p) => p.liquidity) || [0],
+    ),
+    confidence: opp.confidence,
+    detectedAt: opp.detectedAt,
+  };
+}
 
 export function isOpportunityValid(opp: LocalOpportunityCandidate): ValidationResult {
   if (opp.spreadPct <= 0) {
@@ -64,102 +84,37 @@ class GraphDetector {
   private totalCandidates = 0;
 
   start(): void {
-    eventBus.subscribe("pool:update", () => {
-      this.scanGraph();
-    });
-    logInfo("GraphDetector: event-driven — escuchando pool:update");
+    executableDetector.start();
+    logInfo("GraphDetector: delegando a ExecutableDetector + SurfaceEngine");
   }
 
   scanGraph(): LocalOpportunityCandidate[] {
     this.lastScanTime = Date.now();
     this.totalScans++;
 
-    if (!marketValidator.canEmitSignals()) {
-      return [];
-    }
+    if (!marketValidator.canEmitSignals()) return [];
 
-    const found: LocalOpportunityCandidate[] = [];
-    const surfaces = priceGraph.getPairSurfaceLabels();
-
-    for (const label of surfaces) {
-      const surface = priceGraph.getMarketSurface(label);
-      if (!surface) continue;
-
-      const validPools = surface.pools.filter((p) => p.health === "VALID" && p.price > 0);
-      if (validPools.length < 2) continue;
-
-      logInfo(`GraphDetector: ${validPools.length} pools válidos para ${label} — ${validPools.map((p) => p.dex).join(" vs ")}`);
-
-      for (let i = 0; i < validPools.length; i++) {
-        for (let j = i + 1; j < validPools.length; j++) {
-          const poolA = validPools[i];
-          const poolB = validPools[j];
-
-          if (poolA.price <= 0 || poolB.price <= 0) continue;
-
-          const spreadPct = Math.abs((poolB.price - poolA.price) / poolA.price) * 100;
-
-          if (spreadPct < OPPORTUNITY_MIN_SPREAD_BPS / 100) {
-            logInfo(`GraphDetector: ${poolA.dex} vs ${poolB.dex} spread=${spreadPct.toFixed(4)}% — bajo umbral`);
-            continue;
-          }
-
-          const candidate: LocalOpportunityCandidate = {
-            pair: label,
-            symbolA: surface.symbolA,
-            symbolB: surface.symbolB,
-            poolBuy: poolA.price < poolB.price ? poolA.poolAddress : poolB.poolAddress,
-            poolSell: poolA.price < poolB.price ? poolB.poolAddress : poolA.poolAddress,
-            dexBuy: poolA.price < poolB.price ? poolA.dex : poolB.dex,
-            dexSell: poolA.price < poolB.price ? poolB.dex : poolA.dex,
-            priceBuy: Math.min(poolA.price, poolB.price),
-            priceSell: Math.max(poolA.price, poolB.price),
-            spreadPct,
-            liquidity: Math.min(poolA.liquidity, poolB.liquidity),
-            confidence: this.calculateConfidence(poolA.age, poolB.age, poolA.health, poolB.health),
-            detectedAt: Date.now(),
-          };
-
-          const validation = isOpportunityValid(candidate);
-          if (validation.valid) {
-            found.push(candidate);
-            logCrossDexPair(candidate.dexBuy, candidate.dexSell, candidate.spreadPct, 0, 0, candidate.confidence);
-            logSpread(candidate.pair, 0, candidate.dexBuy, candidate.dexSell, candidate.spreadPct, 0, 0, candidate.confidence);
-          }
-        }
-      }
-    }
+    const executableOpps = executableDetector.scan();
+    const found = executableOpps.map(oppToCandidate).filter((c) => isOpportunityValid(c).valid);
 
     this.candidates = found.slice(0, MAX_CANDIDATES);
     this.totalCandidates += found.length;
 
     if (found.length > 0) {
-      logSuccess(`GraphDetector: ${found.length} oportunidad(es) local(es) — ${found[0].pair} spread=${found[0].spreadPct.toFixed(4)}%`);
+      logSuccess(`GraphDetector: ${found.length} oportunidad(es) — ${found[0].pair} spread=${found[0].spreadPct.toFixed(4)}%`);
     }
 
-    if (this.totalScans % 10 === 0) {
-      for (const label of surfaces) {
-        const sp = priceGraph.getMultiPoolSpread(label);
-        logInfo(`Multi-pool spread [${label}]: ${sp.validPools}/${sp.pools} pools válidos, spread=${sp.spreadPct.toFixed(4)}% ${sp.exists ? "✅" : "❌"}`);
+    if (this.totalScans % 5 === 0) {
+      for (const label of priceGraph.getPairSurfaceLabels()) {
+        surfaceEngine.printSurfaceReport(label);
       }
     }
 
     return this.candidates;
   }
 
-  private calculateConfidence(ageA: number, ageB: number, healthA: string, healthB: string): number {
-    let score = 0.5;
-    if (ageA < 5000) score += 0.15;
-    if (ageB < 5000) score += 0.15;
-    if (healthA === "VALID") score += 0.1;
-    if (healthB === "VALID") score += 0.1;
-    return Math.min(1, score);
-  }
-
   getCandidates(): LocalOpportunityCandidate[] {
-    if (Date.now() - this.lastScanTime > CACHE_TTL_MS) {
-      return [];
-    }
+    if (Date.now() - this.lastScanTime > CACHE_TTL_MS) return [];
     return this.candidates;
   }
 
@@ -177,6 +132,7 @@ class GraphDetector {
     this.totalScans = 0;
     this.totalCandidates = 0;
     this.lastScanTime = 0;
+    executableDetector.reset();
   }
 }
 
