@@ -15,6 +15,8 @@ import { marketState, WhirlpoolProvider } from "./market";
 import { pairState } from "./pair-state";
 import { priceGraph } from "./graph";
 import { surfaceEngine, executableDetector, spreadEngine, printNetworkReport, poolHealthMonitor } from "./engine";
+import { profitLedger } from "./engine/profit-ledger";
+import { paperExecution } from "./engine/paper-execution";
 import { eventScheduler } from "./scheduler";
 import { marketValidator } from "./market-validator";
 import { POOL_REGISTRY, getPoolSummary } from "./config/pools";
@@ -121,6 +123,11 @@ async function subscribePools(): Promise<number> {
     logDebug(`  ${provider.dexName}: ${poolAddrs.length} pools para subscribir`);
 
     for (const pool of poolAddrs) {
+      // Skip blacklisted pools
+      if (marketState.isBlacklisted(pool.address)) {
+        logDebug(`  Saltando pool blacklisted ${pool.address.substring(0, 12)}... (${provider.dexName})`);
+        continue;
+      }
       try {
         logInfo(`  Subscribiendo pool ${pool.address.substring(0, 12)}... via ${provider.dexName}`);
         await (provider as any).trackPool(pool.address, pool.feeBps);
@@ -128,11 +135,18 @@ async function subscribePools(): Promise<number> {
       } catch (err) {
         logWarning(`  trackPool falló para ${pool.address.substring(0, 12)}... — ${err instanceof Error ? err.message : String(err)}`);
       }
+      // Stagger: 200ms delay between RPC calls to avoid rate limiting
+      await new Promise(r => setTimeout(r, 200));
     }
   }
 
   for (const entry of POOL_REGISTRY) {
     if (wsManager && entry.address) {
+      // Skip blacklisted pools
+      if (marketState.isBlacklisted(entry.address)) {
+        logDebug(`  Saltando blacklisted ${entry.address.substring(0, 12)}... (${entry.dex})`);
+        continue;
+      }
       const isWhirlpool = entry.dex === "Whirlpool";
       // Only subscribe directly for Whirlpool pools — other DEXes manage their own WS via trackPool
       if (!isWhirlpool) {
@@ -676,6 +690,9 @@ function setupGracefulShutdown(): void {
   const shutdown = async (signal: string) => {
     console.log(`\n\n${signal} recibida`);
     logInfo("Cerrando...");
+    profitLedger.printSessionSummary();
+    profitLedger.exportSessionSummary();
+    paperExecution.printSummary();
     analytics.printStatsReport();
     tokenDiscovery.stop();
     if ((global as any).__healthInterval) clearInterval((global as any).__healthInterval);

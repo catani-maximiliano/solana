@@ -302,7 +302,22 @@ export class PriceGraph {
       }
     }
 
-    // ── 2. Cross-pair implied USD consistency check ──
+    // ── 2. LST sanity check ──
+    // jitoSOL and mSOL should trade within 0.5-2.0 SOL equivalent
+    if ((symFrom === "mSOL" || symFrom === "jitoSOL") && symTo === "SOL") {
+      if (edge.price < 0.5 || edge.price > 2.0) {
+        logWarning(`Graph: ⚡ LST anomaly — ${symFrom}/${symTo} (${edge.dex} ${edge.poolAddress.substring(0, 8)}...) price=$${edge.price.toFixed(4)} outside LST range [0.5, 2.0]`);
+        return "INVALID_PRICE";
+      }
+    }
+    if (symFrom === "SOL" && (symTo === "mSOL" || symTo === "jitoSOL")) {
+      if (edge.price < 0.5 || edge.price > 2.0) {
+        logWarning(`Graph: ⚡ LST anomaly — ${symFrom}/${symTo} (${edge.dex} ${edge.poolAddress.substring(0, 8)}...) price=$${edge.price.toFixed(4)} outside LST range [0.5, 2.0]`);
+        return "INVALID_PRICE";
+      }
+    }
+
+    // ── 3. Cross-pair implied USD consistency check ──
     // Compare the USD price of the "interesting" (non-anchor) token derived via the SOL route
     // vs the USDC route (e.g., JUP price via SOL/JUP vs USDC/JUP). They must agree within 5x.
     if (solUsd > 0) {
@@ -375,7 +390,69 @@ export class PriceGraph {
       return "LOW_LIQUIDITY";
     }
 
+    // ── 5. Triangular consistency check ──
+    // Validate (A/B) * (B/C) ≈ (A/C) for any intermediate token C
+    // This catches inverted prices, wrong decimals, and orientation bugs
+    if (siblings && siblings.length >= 1) {
+      const triCheck = this.checkTriangularConsistency(edge, symFrom, symTo);
+      if (triCheck !== null) {
+        if (triCheck.consistent) {
+          logDebug(`TRIANGULAR CHECK: ${symFrom}/${symTo}=${edge.price.toFixed(4)} = ${triCheck.viaPrice.toFixed(4)} × ${(triCheck.derived / triCheck.viaPrice).toFixed(4)} = ${triCheck.derived.toFixed(4)} (via ${triCheck.via}) dev=${(triCheck.deviation * 100).toFixed(1)}% ✅`);
+        } else {
+          logWarning(`Graph: 🔴 TRIANGULAR INCONSISTENCY — ${symFrom}/${symTo} (${edge.dex} ${edge.poolAddress.substring(0, 8)}...)`);
+          logWarning(`  EXPECTED: ${symFrom}/${symTo} ≈ ${triCheck.derived.toFixed(4)} (via ${symFrom}/${triCheck.via}=${triCheck.viaPrice.toFixed(4)} × ${triCheck.via}/${symTo}=${(triCheck.derived / triCheck.viaPrice).toFixed(4)})`);
+          logWarning(`  ACTUAL:   ${symFrom}/${symTo} = ${edge.price.toFixed(4)}`);
+          logWarning(`  ERROR:    ${(triCheck.deviation * 100).toFixed(1)}%  (×${(edge.price / triCheck.derived).toFixed(1)}x deviation)`);
+          if (triCheck.deviation > 0.20) { // >20% = likely corruption
+            return "INVALID_PRICE";
+          }
+        }
+      }
+    }
+
     return edge.health;
+  }
+
+  /** Check triangular consistency: (symFrom/symTo) vs (symFrom/intermediate)*(intermediate/symTo) */
+  private checkTriangularConsistency(
+    edge: PriceEdge,
+    symFrom: string,
+    symTo: string,
+  ): { consistent: boolean; via: string; viaPrice: number; derived: number; deviation: number } | null {
+    if (!edge.price || edge.price <= 0) return null;
+
+    // Try to find an intermediate token that connects from→to
+    const fromMint = edge.from;
+    const toMint = edge.to;
+
+    // Find all nodes that connect to fromMint (as neighbors)
+    const neighbors = this.getNeighbors(fromMint).filter((n) => n.token !== toMint);
+    for (const n of neighbors) {
+      // via edge: fromMint → neighborToken
+      const viaEdge = this.getDirectPrice(fromMint, n.token);
+      if (!viaEdge || !viaEdge.price || viaEdge.price <= 0) continue;
+
+      // to edge: neighborToken → toMint
+      const toEdge = this.getDirectPrice(n.token, toMint);
+      if (!toEdge || !toEdge.price || toEdge.price <= 0) continue;
+
+      // derived price = price(from→neighbor) * price(neighbor→to)
+      const derived = viaEdge.price * toEdge.price;
+      if (derived <= 0) continue;
+
+      const deviation = Math.abs(edge.price - derived) / Math.max(edge.price, derived);
+      const viaSym = this.mintToSymbol(n.token);
+
+      return {
+        consistent: deviation < 0.10, // <10% deviation = consistent
+        via: viaSym,
+        viaPrice: edge.price,
+        derived,
+        deviation,
+      };
+    }
+
+    return null; // no intermediate to check against
   }
 
   updateFromPool(snapshot: PoolStateSnapshot): void {
@@ -444,16 +521,20 @@ export class PriceGraph {
         : `${this.symbolToMint(symB)}:${this.symbolToMint(symA)}`;
     };
     const pairKey = getCanonicalKey(symA, symB);
+    const canonicalBaseMint = pairKey.split(":")[0];
+    // Normalize price to canonical orientation: if snapshot's mintA != canonical base, invert
+    const isReverseOrientation = snapshot.mintA !== canonicalBaseMint;
+    const normalizedPriceForComparison = isReverseOrientation ? (price > 0 ? 1 / price : price) : price;
     const siblingEdges = (this.edges.get(pairKey) || [])
       .filter((e) => e.poolAddress !== snapshot.poolAddress && e.health === "VALID" && e.price > 0);
     if (siblingEdges.length >= 1) {
-      const prices = siblingEdges.map((e) => e.price).concat(price).sort((a, b) => a - b);
+      const prices = siblingEdges.map((e) => e.price).concat(normalizedPriceForComparison).sort((a, b) => a - b);
       const median = prices.length % 2 === 1
         ? prices[Math.floor(prices.length / 2)]
         : (prices[prices.length / 2 - 1] + prices[prices.length / 2]) / 2;
-      const medianDev = median > 0 ? Math.abs(price - median) / median : 0;
+      const medianDev = median > 0 ? Math.abs(normalizedPriceForComparison - median) / median : 0;
       if (medianDev > 0.5) {
-        logWarning(`Graph: 🔴 PRICE_ANOMALY — ${symA}/${symB} (${snapshot.dex} ${snapshot.poolAddress.substring(0, 8)}...) price=$${price.toFixed(4)} vs median=$${median.toFixed(4)} dev=${(medianDev * 100).toFixed(1)}%`);
+        logWarning(`Graph: 🔴 PRICE_ANOMALY — ${symA}/${symB} (${snapshot.dex} ${snapshot.poolAddress.substring(0, 8)}...) price=$${normalizedPriceForComparison.toFixed(4)} vs median=$${median.toFixed(4)} dev=${(medianDev * 100).toFixed(1)}% (${isReverseOrientation ? "inverted" : "canonical"} orientation)`);
       }
     }
 

@@ -2,6 +2,29 @@ import { logInfo } from "../logger";
 import * as fs from "fs";
 import * as path from "path";
 
+function fmtDatetime(ts: number): string {
+  const d = new Date(ts);
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  const y = d.getUTCFullYear();
+  const mo = pad(d.getUTCMonth() + 1);
+  const day = pad(d.getUTCDate());
+  const h = pad(d.getUTCHours());
+  const mi = pad(d.getUTCMinutes());
+  const s = pad(d.getUTCSeconds());
+  const ms = pad(d.getUTCMilliseconds(), 3);
+  return `${y}-${mo}-${day} ${h}:${mi}:${s}.${ms}`;
+}
+
+function fmtTime(ts: number): string {
+  const d = new Date(ts);
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  const h = pad(d.getUTCHours());
+  const mi = pad(d.getUTCMinutes());
+  const s = pad(d.getUTCSeconds());
+  const ms = pad(d.getUTCMilliseconds(), 3);
+  return `${h}:${mi}:${s}.${ms}`;
+}
+
 export type OpportunityStatus = "REJECTED" | "PROFITABLE" | "EXECUTABLE" | "EXECUTED";
 
 export interface OpportunityRecord {
@@ -144,8 +167,8 @@ export class ProfitLedger {
 
   exportSessionSummary(): void {
     const s = this.getSessionSummary();
-    const header = "session_start,session_end,total_scans,total_opportunities,profitable_count,executable_count,theoretical_pnl_usd,executable_pnl_usd,avg_net_bps,best_trade_usd,worst_trade_usd";
-    const row = `${s.sessionStart},${Date.now()},${s.totalScans},${s.totalOpportunities},${s.profitableCount},${s.executableCount},${s.theoreticalPnlUsd.toFixed(4)},${s.executablePnlUsd.toFixed(4)},${s.avgNetBps.toFixed(2)},${s.bestTradeUsd.toFixed(4)},${s.worstTradeUsd.toFixed(4)}`;
+    const header = "datetime_utc,time_utc,session_start_ms,session_end_ms,total_scans,total_opportunities,profitable_count,executable_count,theoretical_pnl_usd,executable_pnl_usd,avg_net_bps,best_trade_usd,worst_trade_usd";
+    const row = `${fmtDatetime(s.sessionStart)},${fmtTime(Date.now())},${s.sessionStart},${Date.now()},${s.totalScans},${s.totalOpportunities},${s.profitableCount},${s.executableCount},${s.theoreticalPnlUsd.toFixed(4)},${s.executablePnlUsd.toFixed(4)},${s.avgNetBps.toFixed(2)},${s.bestTradeUsd.toFixed(4)},${s.worstTradeUsd.toFixed(4)}`;
     const exists = fs.existsSync(this.csvPathSession);
     if (!exists) {
       fs.writeFileSync(this.csvPathSession, header + "\n");
@@ -155,14 +178,12 @@ export class ProfitLedger {
 
   private appendCsv(record: OpportunityRecord): void {
     if (!this.csvInitialized) {
-      const header = "timestamp,scan_id,route,type,input_usd,output_usd,gross_bps,fees_bps,slippage_bps,net_bps,net_usd,status,confidence,buy_dex,sell_dex,latency_ms";
-      const exists = fs.existsSync(this.csvPathArb);
-      if (!exists) {
-        fs.writeFileSync(this.csvPathArb, header + "\n");
-      }
+      const header = "datetime_utc,time_utc,timestamp_ms,scan_id,route,type,input_usd,output_usd,gross_bps,fees_bps,slippage_bps,net_bps,net_usd,status,confidence,buy_dex,sell_dex,latency_ms";
+      // Overwrite per session: fresh header matching current column format
+      fs.writeFileSync(this.csvPathArb, header + "\n");
       this.csvInitialized = true;
     }
-    const row = `${record.timestamp},${record.scanId},"${record.route}",${record.type},${record.inputUsd.toFixed(2)},${record.outputUsd.toFixed(4)},${record.grossBps.toFixed(2)},${record.feesBps.toFixed(2)},${record.slippageBps.toFixed(2)},${record.netBps.toFixed(2)},${record.netUsd.toFixed(4)},${record.status},${record.confidence.toFixed(2)},${record.buyDex},${record.sellDex},${record.latencyMs}`;
+    const row = `${fmtDatetime(record.timestamp)},${fmtTime(record.timestamp)},${record.timestamp},${record.scanId},"${record.route}",${record.type},${record.inputUsd.toFixed(2)},${record.outputUsd.toFixed(4)},${record.grossBps.toFixed(2)},${record.feesBps.toFixed(2)},${record.slippageBps.toFixed(2)},${record.netBps.toFixed(2)},${record.netUsd.toFixed(4)},${record.status},${record.confidence.toFixed(2)},${record.buyDex},${record.sellDex},${record.latencyMs}`;
     fs.appendFileSync(this.csvPathArb, row + "\n");
   }
 

@@ -11,6 +11,7 @@ import { logSuccess, logInfo, logWarning, logDebug } from "../logger";
 import { eventBus } from "../events";
 import { marketValidator } from "../market-validator";
 import { profitLedger } from "./profit-ledger";
+import { paperExecution } from "./paper-execution";
 
 const MIN_NET_SPREAD_BPS = 0.3;
 const MAX_CANDIDATES = 20;
@@ -19,6 +20,9 @@ const MIN_CONFIDENCE = 0.25;
 const MAX_SLOT_LAG = 15;
 const STALE_AGE_MS = 8_000;
 const SOL_PRICE_USD = 160;
+const PERSISTENCE_WINDOW_MS = 1_500; // route must survive 1.5s before executable
+const SIMULATED_LATENCY_MS = 2_000; // simulated execution delay
+const SLIPPAGE_DECAY_PER_SEC = 0.3; // 30% of slippage added per second of latency
 
 export class ExecutableDetector {
   private opportunities: ExecutableOpportunity[] = [];
@@ -30,6 +34,21 @@ export class ExecutableDetector {
   private triangularScanCounter = 0;
   private rejectedMultiHopCount = 0;
   private multiHopRejectReasons: string[] = [];
+  private routeFirstSeen = new Map<string, number>(); // route → first detection timestamp
+
+  /** Days since route was first seen (persistence) */
+  private getRouteAge(route: string, now: number): number {
+    const first = this.routeFirstSeen.get(route);
+    return first ? now - first : 0;
+  }
+
+  /** Compute latency-adjusted net: subtract estimated slippage decay */
+  private latencyAdjustedNet(netBps: number, routeAge: number): { adjustedNet: number; decayBps: number } {
+    // After SIMULATED_LATENCY_MS, additional slippage may occur
+    const latencySec = SIMULATED_LATENCY_MS / 1000;
+    const decayBps = netBps * SLIPPAGE_DECAY_PER_SEC * latencySec;
+    return { adjustedNet: Math.max(0, netBps - decayBps), decayBps };
+  }
 
   start(): void {
     eventBus.subscribe("pool:update", () => {
@@ -215,6 +234,30 @@ export class ExecutableDetector {
         continue;
       }
 
+      // Persistence tracking: first time we see this route
+      const routeKey = mh.route;
+      const now = Date.now();
+      if (!this.routeFirstSeen.has(routeKey)) {
+        this.routeFirstSeen.set(routeKey, now);
+        logDebug(`MH persistence: ${mh.symbols} first seen`);
+      }
+      const age = this.getRouteAge(routeKey, now);
+
+      // Persistence filter: must survive minimum window
+      if (age < PERSISTENCE_WINDOW_MS) {
+        this.multiHopRejectReasons.push(`mh:${mh.symbols} age=${(age/1000).toFixed(1)}s < persistence=${PERSISTENCE_WINDOW_MS/1000}s`);
+        logDebug(`MH PERSISTENCE WAIT: ${mh.symbols} age=${(age/1000).toFixed(1)}s/${PERSISTENCE_WINDOW_MS/1000}s`);
+        this.rejectedMultiHopCount++;
+        continue;
+      }
+
+      // Latency-adjusted net
+      const { adjustedNet, decayBps } = this.latencyAdjustedNet(mh.netBps, age);
+      if (adjustedNet < MIN_NET_SPREAD_BPS) {
+        this.multiHopRejectReasons.push(`mh:${mh.symbols} latency-adjusted net=${adjustedNet.toFixed(2)}bps < min`);
+        continue;
+      }
+
       // Execution confidence score
       const conf = this.routeExecutionConfidence(mh);
 
@@ -268,11 +311,11 @@ export class ExecutableDetector {
         buyPrice: firstStep.price,
         sellPrice: lastStep.price,
         grossSpreadBps: mh.grossBps,
-        netSpreadBps: mh.netBps,
+        netSpreadBps: adjustedNet,
         feesBps: mh.feesBps,
         slippageBps: mh.slippageBps,
         impactBps: mh.slippageBps,
-        estimatedProfitUsd: mh.profitUsd,
+        estimatedProfitUsd: mh.profitUsd * (1 - decayBps / 100),
         estimatedProfitSol: mh.inputUsd * (1 + mh.netBps / 10000) - mh.inputUsd,
         totalFees: 0,
         slippageCost: 0,
@@ -289,7 +332,17 @@ export class ExecutableDetector {
         executionPlan,
       };
 
-      logInfo(`Executable: ✅ PROMOTED multi-hop ${mh.symbols} net=+${mh.netBps.toFixed(2)}bps profit=$${mh.profitUsd.toFixed(4)} conf=${(conf * 100).toFixed(0)}%`);
+      logInfo(`Executable: ✅ PROMOTED multi-hop ${mh.symbols} net=+${adjustedNet.toFixed(2)}bps (raw=+${mh.netBps.toFixed(2)}bps latency-decay=${decayBps.toFixed(1)}bps) profit=$${(mh.profitUsd * (1 - decayBps / 100)).toFixed(4)} conf=${(conf * 100).toFixed(0)}% age=${(age/1000).toFixed(1)}s`);
+      // Register for paper execution replay
+      paperExecution.registerExecutable(
+        mh.symbols,
+        mh.steps.map(s => ({ from: s.fromToken, to: s.toToken })),
+        adjustedNet,
+        mh.profitUsd * (1 - decayBps / 100),
+        mh.inputUsd,
+        firstStep?.fromToken || "",
+        lastStep?.toToken || "",
+      );
       profitLedger.record({
         timestamp: Date.now(),
         route: mh.symbols,

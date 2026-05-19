@@ -46,6 +46,7 @@ export class MarketStateCache {
   private slotWarnings = 0;
   private stalePoolCleanups = 0;
   private mintOrderMap = new Map<string, { onChainMintA: string; onChainMintB: string }>();
+  private invalidPools = new Set<string>(); // pools blacklisted after repeated failures
 
   private knownMints: Record<string, string> = {
     "So11111111111111111111111111111111111111112": "SOL",
@@ -360,7 +361,26 @@ export class MarketStateCache {
     }
   }
 
-  getStats(): { pools: number; pairs: number; updates: number; uptime: number; slotWarnings: number; staleCleanups: number; pairDetails: Array<{ label: string; updates: number; price: number; age: number }> } {
+  /** Add a pool to the blacklist (repeated failures) */
+  blacklistPool(address: string, reason: string): void {
+    this.invalidPools.add(address);
+    this.pools.delete(address);
+    logInfo(`StateCache: pool ${address.substring(0, 8)}... blacklisted — ${reason}`);
+  }
+
+  isBlacklisted(address: string): boolean {
+    return this.invalidPools.has(address);
+  }
+
+  getBlacklistedCount(): number {
+    return this.invalidPools.size;
+  }
+
+  getBlacklistedPools(): string[] {
+    return Array.from(this.invalidPools);
+  }
+
+  getStats(): { pools: number; pairs: number; updates: number; uptime: number; slotWarnings: number; staleCleanups: number; blacklisted: number; pairDetails: Array<{ label: string; updates: number; price: number; age: number }> } {
     return {
       pools: this.pools.size,
       pairs: this.pairs.size,
@@ -368,6 +388,7 @@ export class MarketStateCache {
       uptime: Date.now() - this.startTime,
       slotWarnings: this.slotWarnings,
       staleCleanups: this.stalePoolCleanups,
+      blacklisted: this.invalidPools.size,
       pairDetails: Array.from(this.pairs.values()).map((p) => ({
         label: p.label,
         updates: p.updateCount,
