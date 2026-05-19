@@ -27,6 +27,38 @@ export interface ExecutableOpportunity {
   persistenceMs: number;
   qualityScore: number;
   detectedAt: number;
+  executionPlan?: MultiHopExecutionPlan;
+}
+
+export interface MultiHopExecutionStep {
+  hopIndex: number;
+  fromToken: string;
+  toToken: string;
+  fromSymbol: string;
+  toSymbol: string;
+  poolAddress: string;
+  dex: string;
+  inputAmount: number;
+  outputAmount: number;
+  feePaid: number;
+  feeBps: number;
+  slippageBps: number;
+  priceBefore: number;
+  priceAfter: number;
+}
+
+export interface MultiHopExecutionPlan {
+  route: string;
+  inputToken: string;
+  outputToken: string;
+  inputAmount: number;
+  outputAmount: number;
+  steps: MultiHopExecutionStep[];
+  cumulativeFeeBps: number;
+  cumulativeSlippageBps: number;
+  netBps: number;
+  profitUsd: number;
+  hopCount: number;
 }
 
 export interface SurfaceReport {
@@ -40,6 +72,7 @@ export interface SurfaceReport {
   midPrice: number;
   spreadBps: number;
   executableSpreadBps: number;
+  requiredGrossBps: number;
   weightedMid: number;
   pools: SurfacePoolEntry[];
   freshness: number;
@@ -138,4 +171,47 @@ export function calculateFreshnessScore(ageMs: number, slotLag: number): number 
   const ageScore = Math.max(0, 1 - ageMs / 10_000);
   const slotScore = Math.max(0, 1 - slotLag / 20);
   return Math.min(1, (ageScore * 0.6 + slotScore * 0.4));
+}
+
+export interface TradeHop {
+  fromToken: string;
+  toToken: string;
+  fromSymbol: string;
+  toSymbol: string;
+  dex: string;
+  poolAddress: string;
+  price: number;
+  inversePrice: number;
+  liquidity: number;
+  feeBps: number;
+  slot: number;
+  age: number;
+  health: string;
+}
+
+export interface TradePath {
+  hops: TradeHop[];
+  pathSymbols: string[];
+  pathMints: string[];
+  grossSpreadBps: number;
+  totalFeeBps: number;
+  totalSlippageBps: number;
+  netSpreadBps: number;
+  estimatedProfitUsd: number;
+  optimalSizeSol: number;
+  confidence: number;
+  detectedAt: number;
+  routeLabel: string;
+}
+
+export interface PathEnumerationResult {
+  paths: TradePath[];
+  totalExplored: number;
+  cyclesFound: number;
+  rejectedStale: number;
+  rejectedFees: number;
+  rejectedSlippage: number;
+  rejectedDisconnected: number;
+  rejectedDuplicate: number;
+  executionTimeMs: number;
 }

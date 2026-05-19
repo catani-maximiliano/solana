@@ -11,10 +11,10 @@ export interface ProgramConfig {
 
 export const OFFICIAL_PROGRAMS: Record<string, ProgramConfig> = {
   raydiumClmm: {
-    id: "CAMMCzo5YLJwZ4kvb9TgMGCd7x4cL2ZAnTkQ3eHcWQH",
+    id: "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
     name: "Raydium CLMM",
     type: "clmm",
-    version: "1.0",
+    version: "2.0",
     verified: true,
   },
   whirlpool: {
@@ -25,10 +25,10 @@ export const OFFICIAL_PROGRAMS: Record<string, ProgramConfig> = {
     verified: true,
   },
   meteoraDlmm: {
-    id: "LbVRzUvG8j2mGLjLxL9ZH7y9c5Zw7KkJSbus6nAq7L",
+    id: "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",
     name: "Meteora DLMM",
     type: "dlmm",
-    version: "1.0",
+    version: "2.1",
     verified: true,
   },
 };

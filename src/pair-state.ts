@@ -26,7 +26,11 @@ const MONITORED_PAIRS: Array<{ label: string; mintA: string; mintB: string }> = 
   { label: "SOL/JUP", mintA: "So11111111111111111111111111111111111111112", mintB: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN" },
   { label: "SOL/RAY", mintA: "So11111111111111111111111111111111111111112", mintB: "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R" },
   { label: "SOL/BONK", mintA: "So11111111111111111111111111111111111111112", mintB: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263" },
-  { label: "WIF/USDC", mintA: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", mintB: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+  { label: "JUP/USDC", mintA: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", mintB: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+  { label: "BONK/USDC", mintA: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", mintB: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+  { label: "RAY/USDC", mintA: "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", mintB: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+  { label: "SOL/mSOL", mintA: "So11111111111111111111111111111111111111112", mintB: "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So" },
+  { label: "SOL/jitoSOL", mintA: "So11111111111111111111111111111111111111112", mintB: "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn" },
 ];
 
 export class PairStateManager {

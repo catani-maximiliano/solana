@@ -8,9 +8,17 @@ import { marketState, PoolStateSnapshot } from "./state-cache";
 import { marketValidator } from "../market-validator";
 import { OFFICIAL_PROGRAMS } from "../config/programs";
 import { config } from "../config";
-import { POOL_REGISTRY } from "../config/pools";
+import { POOL_REGISTRY, TOKEN_MINTS } from "../config/pools";
+import {
+  validateAccountSize,
+  verifyOwner,
+  validatePoolFields,
+  learnDiscriminator,
+} from "./account-validator";
+import { accountMetrics } from "./account-metrics";
 
 const WHIRLPOOL_PROGRAM = OFFICIAL_PROGRAMS.whirlpool.id;
+const DEX = "Whirlpool";
 
 export type WhirlpoolState = "INITIALIZED" | "CONNECTED" | "SUBSCRIBED" | "RECEIVING_DATA" | "HEALTHY" | "DEGRADED" | "FAILED" | "SHUTDOWN";
 
@@ -32,6 +40,14 @@ function parseWhirlpoolData(data: Buffer, address: string): WhirlpoolLayout | nu
     const requiredLen = 85;
     if (data.length < requiredLen) {
       logDebug(`Whirlpool: datos insuficientes (${data.length} bytes, mínimo ${requiredLen}) — ${address.substring(0, 12)}...`);
+      accountMetrics.recordRejection(DEX, "WRONG_SIZE", 0);
+      return null;
+    }
+
+    const vsize = validateAccountSize(DEX, data.length);
+    if (!vsize.valid) {
+      logWarning(`Whirlpool: ${vsize.detail}`);
+      accountMetrics.recordRejection(DEX, "WRONG_SIZE", 0);
       return null;
     }
 
@@ -73,26 +89,19 @@ function parseWhirlpoolData(data: Buffer, address: string): WhirlpoolLayout | nu
 
     const tickCurrentIndex = data.readInt32LE(81);
 
-    const fee = Math.min(10000, feeRate);
+    const fee = Math.min(10000, Math.round(feeRate / 100));
+
+    const vfields = validatePoolFields(tickCurrentIndex, sqrtPrice, liquidity, fee);
+    if (!vfields.valid) {
+      logWarning(`Whirlpool: ${vfields.reason} — ${vfields.detail || ""} INVALIDANDO ${address.substring(0, 12)}...`);
+      accountMetrics.recordRejection(DEX, vfields.reason!, 0);
+      return null;
+    }
+
+    learnDiscriminator(DEX, data.readBigInt64LE(0));
 
     if (config.debugMode) {
-      logDebug(`Whirlpool parsed [${address.substring(0, 8)}]: mintA=${mintA.substring(0, 8)}... mintB=${mintB.substring(0, 8)}... sqrtPrice=${sqrtPrice} tick=${tickCurrentIndex} liq=${liquidity} fee=${feeRate}bps tickSpacing=${tickSpacing}`);
-    }
-
-    if (tickCurrentIndex < -500000 || tickCurrentIndex > 500000) {
-      logWarning(`Whirlpool: tick=${tickCurrentIndex} fuera de rango — INVALIDANDO`);
-      return null;
-    }
-
-    if (sqrtPrice === 0n) {
-      logWarning(`Whirlpool: sqrtPrice=0 — INVALIDANDO`);
-      return null;
-    }
-
-    const liqNum = Number(liquidity);
-    if (!isFinite(liqNum) || liqNum > 1e18) {
-      logWarning(`Whirlpool: liquidity=${liqNum.toExponential(2)} absurda — INVALIDANDO`);
-      return null;
+      logDebug(`Whirlpool parsed [${address.substring(0, 8)}]: mintA=${mintA.substring(0, 8)}... mintB=${mintB.substring(0, 8)}... sqrtPrice=${sqrtPrice} tick=${tickCurrentIndex} liq=${liquidity} fee_raw=${feeRate}(hundredths_bps) fee=${fee}bps tickSpacing=${tickSpacing}`);
     }
 
     return {
@@ -107,7 +116,7 @@ function parseWhirlpoolData(data: Buffer, address: string): WhirlpoolLayout | nu
 }
 
 export class WhirlpoolProvider implements DexPoolReader {
-  readonly dexName = "Whirlpool";
+  readonly dexName = DEX;
   readonly programId = WHIRLPOOL_PROGRAM;
   readonly poolType: PoolType = "clmm";
   private connection: Connection;
@@ -218,7 +227,14 @@ export class WhirlpoolProvider implements DexPoolReader {
         logWarning(`Whirlpool: account ${poolAddress.substring(0, 12)}... NO ENCONTRADO en RPC`);
       }
 
-      if (acc && acc.data.length >= 150) {
+      const vown = await verifyOwner(this.connection, poolAddress, WHIRLPOOL_PROGRAM);
+      if (!vown.valid) {
+        logWarning(`Whirlpool: ${vown.detail} — RECHAZANDO pool ${poolAddress.substring(0, 12)}...`);
+        accountMetrics.recordRejection(DEX, "WRONG_OWNER", 0);
+        return;
+      }
+
+      if (acc && acc.data.length >= 85) {
         const currentSlot = await this.connection.getSlot("confirmed").catch(() => 0);
         logDebug(`Whirlpool: slot actual en fetch inicial: ${currentSlot}`);
         const parsed = parseWhirlpoolData(acc.data, poolAddress);
@@ -253,11 +269,10 @@ export class WhirlpoolProvider implements DexPoolReader {
     const sqrtPriceX64 = parsed.sqrtPrice.toString();
     const liquidity = parsed.liquidity.toString();
 
-    const poolEntry = POOL_REGISTRY.find((p) => p.address === parsed.poolAddress);
-    const mintA = poolEntry?.mintA || parsed.mintA;
-    const mintB = poolEntry?.mintB || parsed.mintB;
-    const decimalsA = poolEntry?.decimalsA ?? 9;
-    const decimalsB = poolEntry?.decimalsB ?? 6;
+    const mintA = parsed.mintA;
+    const mintB = parsed.mintB;
+    const decimalsA = (TOKEN_MINTS as Record<string, number>)[parsed.mintA] ?? 9;
+    const decimalsB = (TOKEN_MINTS as Record<string, number>)[parsed.mintB] ?? 9;
 
     const snapshot: PoolStateSnapshot = {
       poolAddress: parsed.poolAddress,
@@ -308,6 +323,10 @@ export class WhirlpoolProvider implements DexPoolReader {
     try {
       const acc = await this.connection.getAccountInfo(new PublicKey(poolAddress));
       if (!acc || acc.data.length < 150) return null;
+
+      const vown = await verifyOwner(this.connection, poolAddress, WHIRLPOOL_PROGRAM);
+      if (!vown.valid) return null;
+
       const p = parseWhirlpoolData(acc.data, poolAddress);
       if (!p) return null;
       this.emitPoolUpdate(p, 0);

@@ -27,15 +27,20 @@ export function getAmountAFromLiquidity(
   sqrtPriceA: bigint,
   sqrtPriceB: bigint
 ): bigint {
+  if (liquidity <= 0n || sqrtPrice <= 0n || sqrtPriceA <= 0n || sqrtPriceB <= 0n) return 0n;
+
   const [lower, upper] = sqrtPriceA < sqrtPriceB ? [sqrtPriceA, sqrtPriceB] : [sqrtPriceB, sqrtPriceA];
 
   if (sqrtPrice <= lower) return 0n;
+  if (lower <= 0n || upper <= 0n) return 0n;
   if (sqrtPrice >= upper) {
     const delta = upper - lower;
-    return liquidity * delta / (upper * lower);
+    const div = upper * lower;
+    return div > 0n ? liquidity * delta / div : 0n;
   }
   const delta = upper - sqrtPrice;
-  return liquidity * delta / (upper * sqrtPrice);
+  const div = upper * sqrtPrice;
+  return div > 0n ? liquidity * delta / div : 0n;
 }
 
 export function getAmountBFromLiquidity(
@@ -60,21 +65,31 @@ export function estimateSwapOutput(
   feeBps: number,
   zeroForOne: boolean
 ): { outputAmount: bigint; sqrtPriceAfter: bigint; feePaid: bigint } {
+  if (liquidity <= 0n || sqrtPrice <= 0n || inputAmount <= 0n) {
+    return { outputAmount: 0n, sqrtPriceAfter: sqrtPrice, feePaid: 0n };
+  }
+
   const fee = inputAmount * BigInt(feeBps) / 10000n;
   const amountIn = inputAmount - fee;
+  if (amountIn <= 0n) {
+    return { outputAmount: 0n, sqrtPriceAfter: sqrtPrice, feePaid: fee };
+  }
 
   let sqrtPriceAfter: bigint;
   let outputAmount: bigint;
 
   if (zeroForOne) {
-    const numerator = liquidity * sqrtPrice;
     const denominator = liquidity + amountIn * sqrtPrice;
-    sqrtPriceAfter = numerator / denominator;
-    outputAmount = (liquidity * (sqrtPrice - sqrtPriceAfter)) / (sqrtPrice * sqrtPriceAfter);
+    sqrtPriceAfter = denominator > 0n ? (liquidity * sqrtPrice) / denominator : sqrtPrice;
+    const denom2 = sqrtPrice * sqrtPriceAfter;
+    outputAmount = denom2 > 0n ? (liquidity * (sqrtPrice - sqrtPriceAfter)) / denom2 : 0n;
   } else {
-    sqrtPriceAfter = sqrtPrice + (amountIn * 2n ** 64n) / liquidity;
-    outputAmount = (liquidity * (sqrtPriceAfter - sqrtPrice)) / sqrtPriceAfter;
+    const liqDiv = amountIn * 2n ** 64n;
+    sqrtPriceAfter = liquidity > 0n ? sqrtPrice + liqDiv / liquidity : sqrtPrice;
+    outputAmount = sqrtPriceAfter > 0n ? (liquidity * (sqrtPriceAfter - sqrtPrice)) / sqrtPriceAfter : 0n;
   }
+
+  if (outputAmount < 0n) outputAmount = 0n;
 
   return { outputAmount, sqrtPriceAfter, feePaid: fee };
 }

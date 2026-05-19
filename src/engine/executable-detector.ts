@@ -1,20 +1,24 @@
 import { priceGraph } from "../graph";
 import { surfaceEngine } from "./market-surface-engine";
+import { spreadEngine, MultiHopCandidate } from "./spread-engine";
 import { slippageEstimator } from "./slippage-estimator";
 import { edgeQualityScorer } from "./edge-quality";
 import { spreadPersistence } from "./spread-persistence";
 import { microstructure } from "./microstructure";
-import { ExecutableOpportunity, calculateFreshnessScore, calculateLatencyRisk } from "./types";
-import { logSuccess, logInfo } from "../logger";
+import { pathBuilder, bestEdgeSelector } from "./path-builder";
+import { ExecutableOpportunity, TradePath, calculateFreshnessScore, calculateLatencyRisk } from "./types";
+import { logSuccess, logInfo, logWarning, logDebug } from "../logger";
 import { eventBus } from "../events";
 import { marketValidator } from "../market-validator";
+import { profitLedger } from "./profit-ledger";
 
 const MIN_NET_SPREAD_BPS = 0.3;
-const MAX_CANDIDATES = 10;
+const MAX_CANDIDATES = 20;
 const DETECTION_COOLDOWN_MS = 1_000;
 const MIN_CONFIDENCE = 0.25;
 const MAX_SLOT_LAG = 15;
 const STALE_AGE_MS = 8_000;
+const SOL_PRICE_USD = 160;
 
 export class ExecutableDetector {
   private opportunities: ExecutableOpportunity[] = [];
@@ -22,13 +26,17 @@ export class ExecutableDetector {
   private lastDetectionTime = 0;
   private totalScans = 0;
   private totalOpportunities = 0;
+  private lastTriangularResult = { paths: [], totalExplored: 0, cyclesFound: 0, rejectedStale: 0, rejectedFees: 0, rejectedSlippage: 0, rejectedDisconnected: 0, rejectedDuplicate: 0, executionTimeMs: 0 } as any;
+  private triangularScanCounter = 0;
+  private rejectedMultiHopCount = 0;
+  private multiHopRejectReasons: string[] = [];
 
   start(): void {
     eventBus.subscribe("pool:update", () => {
       surfaceEngine.invalidateCache();
       this.scan();
     });
-    logInfo("ExecutableDetector: event-driven — escuchando pool:update");
+    logInfo("ExecutableDetector: event-driven — escuchando pool:update + scanning triangular routes");
   }
 
   scan(): ExecutableOpportunity[] {
@@ -37,14 +45,26 @@ export class ExecutableDetector {
     this.lastDetectionTime = now;
     this.totalScans++;
 
+    // Clear previous detection keys so fresh opportunities aren't blocked
+    this.detectedKeys.clear();
+
     if (!marketValidator.canEmitSignals()) return [];
 
     const found: ExecutableOpportunity[] = [];
-    const labels = priceGraph.getPairSurfaceLabels();
+    this.rejectedMultiHopCount = 0;
+    this.multiHopRejectReasons = [];
 
+    // ── Direct pair cross-DEX detection ──
+    const labels = priceGraph.getPairSurfaceLabels();
     for (const label of labels) {
       const report = surfaceEngine.getSurface(label);
       if (!report || report.pools.length < 2) continue;
+
+      // Dynamic minimum gross spread check
+      if (report.spreadBps < report.requiredGrossBps) {
+        logDebug(`Executable: SKIPPED_LOW_EDGE ${label} — gross ${report.spreadBps.toFixed(1)}bps < required ${report.requiredGrossBps.toFixed(1)}bps (fees+slip+safety)`);
+        continue;
+      }
       if (report.executableSpreadBps < MIN_NET_SPREAD_BPS) continue;
 
       for (let i = 0; i < report.pools.length; i++) {
@@ -136,6 +156,219 @@ export class ExecutableDetector {
       }
     }
 
+    // ── Multi-hop candidates from spreadEngine (every scan) ──
+    const multiHopCandidates = spreadEngine.getMultiHopCandidates();
+    logDebug(`Executable: ${multiHopCandidates.length} multi-hop candidates received`);
+    if (multiHopCandidates.length > 0) {
+      for (const mh of multiHopCandidates) {
+        logDebug(`  MH candidate: ${mh.symbols} net=${mh.netBps.toFixed(2)}bps profit=$${mh.profitUsd.toFixed(4)} hops=${mh.steps.length}`);
+      }
+    }
+    for (const mh of multiHopCandidates) {
+      if (mh.netBps < MIN_NET_SPREAD_BPS) {
+        this.multiHopRejectReasons.push(`mh:${mh.symbols} net=${mh.netBps.toFixed(2)}bps < min=${MIN_NET_SPREAD_BPS}bps`);
+        continue;
+      }
+      if (mh.steps.length < 2) {
+        this.multiHopRejectReasons.push(`mh:${mh.symbols} steps=${mh.steps.length} < 2`);
+        continue;
+      }
+
+      // Atomic execution validation: all hops must be VALID + FRESH
+      let atomicValid = true;
+      const hopErrors: string[] = [];
+      for (const step of mh.steps) {
+        const edge = priceGraph.getDirectPrice(step.fromToken, step.toToken);
+        if (!edge) {
+          hopErrors.push(`${step.fromSymbol}→${step.toSymbol}: no edge`);
+          logDebug(`  MH hop FAIL: ${step.fromSymbol}→${step.toSymbol} — no edge in graph`);
+          atomicValid = false;
+          continue;
+        }
+        if (edge.health !== "VALID") {
+          hopErrors.push(`${step.fromSymbol}→${step.toSymbol}: health=${edge.health}`);
+          logDebug(`  MH hop FAIL: ${step.fromSymbol}→${step.toSymbol} — health=${edge.health} (need VALID)`);
+          atomicValid = false;
+          continue;
+        }
+        const age = Date.now() - edge.timestamp;
+        if (age > 30000) {
+          hopErrors.push(`${step.fromSymbol}→${step.toSymbol}: stale ${(age/1000).toFixed(0)}s`);
+          logDebug(`  MH hop FAIL: ${step.fromSymbol}→${step.toSymbol} — age=${(age/1000).toFixed(0)}s > 30s`);
+          atomicValid = false;
+          continue;
+        }
+        // Check reverse edge exists for multi-hop continuity
+        const revEdge = priceGraph.getDirectPrice(step.toToken, step.fromToken);
+        if (!revEdge) {
+          hopErrors.push(`${step.fromSymbol}→${step.toSymbol}: no reverse edge`);
+          logDebug(`  MH hop FAIL: ${step.fromSymbol}→${step.toSymbol} — reverse edge missing`);
+          atomicValid = false;
+          continue;
+        }
+        logDebug(`  MH hop OK: ${step.fromSymbol}→${step.toSymbol} — ${edge.dex} health=${edge.health} age=${(age/1000).toFixed(1)}s`);
+      }
+
+      if (!atomicValid) {
+        this.multiHopRejectReasons.push(`mh:${mh.symbols} atomic FAIL — ${hopErrors.join("; ")}`);
+        this.rejectedMultiHopCount++;
+        continue;
+      }
+
+      // Execution confidence score
+      const conf = this.routeExecutionConfidence(mh);
+
+      const oppKey = `mh:${mh.route}`;
+      if (this.detectedKeys.has(oppKey)) continue;
+      this.detectedKeys.add(oppKey);
+
+      const firstStep = mh.steps[0];
+      const lastStep = mh.steps[mh.steps.length - 1];
+
+      // Build execution plan with step-by-step breakdown
+      const executionSteps = mh.steps.map((s, i) => ({
+        hopIndex: i,
+        fromToken: s.fromToken,
+        toToken: s.toToken,
+        fromSymbol: s.fromSymbol,
+        toSymbol: s.toSymbol,
+        poolAddress: s.poolAddress,
+        dex: s.dex,
+        inputAmount: s.inputAmount,
+        outputAmount: s.outputAmount,
+        feePaid: s.feeAmount,
+        feeBps: s.feeBps,
+        slippageBps: s.slippageBps,
+        priceBefore: s.price,
+        priceAfter: s.price * (1 - s.slippageBps / 10000),
+      }));
+
+      const executionPlan = {
+        route: mh.route,
+        inputToken: firstStep.fromToken,
+        outputToken: lastStep.toToken,
+        inputAmount: mh.inputUsd,
+        outputAmount: mh.inputUsd * (1 + mh.netBps / 10000),
+        steps: executionSteps,
+        cumulativeFeeBps: mh.feesBps,
+        cumulativeSlippageBps: mh.slippageBps,
+        netBps: mh.netBps,
+        profitUsd: mh.profitUsd,
+        hopCount: mh.hopCount,
+      };
+
+      const opp: ExecutableOpportunity = {
+        pair: mh.symbols,
+        symbolA: firstStep.fromSymbol,
+        symbolB: lastStep.toSymbol,
+        buyPool: firstStep.poolAddress,
+        sellPool: lastStep.poolAddress,
+        buyDex: firstStep.dex,
+        sellDex: lastStep.dex,
+        buyPrice: firstStep.price,
+        sellPrice: lastStep.price,
+        grossSpreadBps: mh.grossBps,
+        netSpreadBps: mh.netBps,
+        feesBps: mh.feesBps,
+        slippageBps: mh.slippageBps,
+        impactBps: mh.slippageBps,
+        estimatedProfitUsd: mh.profitUsd,
+        estimatedProfitSol: mh.inputUsd * (1 + mh.netBps / 10000) - mh.inputUsd,
+        totalFees: 0,
+        slippageCost: 0,
+        impactCost: mh.slippageBps,
+        executableSize: mh.inputUsd,
+        optimalSize: mh.inputUsd,
+        liquidityConfidence: conf,
+        confidence: conf,
+        latencyRisk: "MEDIUM",
+        freshnessScore: 0.5,
+        persistenceMs: 0,
+        qualityScore: conf,
+        detectedAt: Date.now(),
+        executionPlan,
+      };
+
+      logInfo(`Executable: ✅ PROMOTED multi-hop ${mh.symbols} net=+${mh.netBps.toFixed(2)}bps profit=$${mh.profitUsd.toFixed(4)} conf=${(conf * 100).toFixed(0)}%`);
+      profitLedger.record({
+        timestamp: Date.now(),
+        route: mh.symbols,
+        type: "multi_hop",
+        inputUsd: mh.inputUsd,
+        outputUsd: mh.inputUsd + mh.profitUsd,
+        grossBps: mh.grossBps,
+        feesBps: mh.feesBps,
+        slippageBps: mh.slippageBps,
+        netBps: mh.netBps,
+        netUsd: mh.profitUsd,
+        status: "EXECUTABLE",
+        confidence: conf,
+        buyDex: firstStep?.dex || "",
+        sellDex: lastStep?.dex || "",
+        latencyMs: 0,
+      });
+      found.push(opp);
+    }
+
+    // ── Multi-hop promotion invariant ──
+    // If a route has net > 0 but wasn't promoted, ensure it was logged
+    if (multiHopCandidates.some(mh => mh.netBps > 0) && found.length === multiHopCandidates.filter(mh => mh.netBps > 0).length) {
+      logDebug(`Executable: all ${multiHopCandidates.filter(mh => mh.netBps > 0).length} profitable multi-hop route(s) successfully promoted`);
+    }
+
+    // ── Triangular path detection (every 3rd scan) ──
+    this.triangularScanCounter++;
+    if (this.triangularScanCounter % 3 === 0) {
+      const triResult = pathBuilder.enumerateTriangularPaths();
+      this.lastTriangularResult = triResult;
+
+      for (const tp of triResult.paths) {
+        const routeSymbols = tp.pathSymbols;
+        if (routeSymbols.length < 2) continue;
+
+        const oppKey = `tri:${tp.routeLabel}`;
+        if (this.detectedKeys.has(oppKey)) continue;
+        this.detectedKeys.add(oppKey);
+
+        const hop = tp.hops[0];
+        const lastHop = tp.hops[tp.hops.length - 1];
+        const conf = Math.min(1, tp.confidence);
+
+        const opp: ExecutableOpportunity = {
+          pair: tp.routeLabel,
+          symbolA: routeSymbols[0],
+          symbolB: routeSymbols[routeSymbols.length - 1],
+          buyPool: hop.poolAddress,
+          sellPool: lastHop.poolAddress,
+          buyDex: hop.dex,
+          sellDex: lastHop.dex,
+          buyPrice: hop.price,
+          sellPrice: lastHop.price,
+          grossSpreadBps: tp.grossSpreadBps,
+          netSpreadBps: tp.netSpreadBps,
+          feesBps: tp.totalFeeBps,
+          slippageBps: tp.totalSlippageBps,
+          impactBps: tp.totalSlippageBps,
+          estimatedProfitUsd: tp.estimatedProfitUsd,
+          estimatedProfitSol: tp.optimalSizeSol,
+          totalFees: 0,
+          slippageCost: 0,
+          impactCost: tp.totalSlippageBps,
+          executableSize: tp.optimalSizeSol,
+          optimalSize: tp.optimalSizeSol,
+          liquidityConfidence: conf,
+          confidence: conf,
+          latencyRisk: "MEDIUM",
+          freshnessScore: 0.5,
+          persistenceMs: 0,
+          qualityScore: conf,
+          detectedAt: Date.now(),
+        };
+
+        found.push(opp);
+      }
+    }
+
     found.sort((a, b) => this.rankScore(b) - this.rankScore(a));
     this.opportunities = found.slice(0, MAX_CANDIDATES);
     this.totalOpportunities += this.opportunities.length;
@@ -147,13 +380,24 @@ export class ExecutableDetector {
   }
 
   private rankScore(opp: ExecutableOpportunity): number {
+    const profitScore = Math.min(1, opp.estimatedProfitUsd / 0.1);
+    const confidenceScore = opp.confidence;
+    const freshnessScore = opp.freshnessScore;
+    const qualityScore = opp.qualityScore;
+    const latencyScore = opp.latencyRisk === "LOW" ? 1 : opp.latencyRisk === "MEDIUM" ? 0.5 : 0;
+    const persistScore = Math.min(1, opp.persistenceMs / 2000);
+
+    // Persistent spreads > 15bps get a big boost
+    const grossBoost = opp.grossSpreadBps > 15 ? Math.min(1, (opp.grossSpreadBps - 15) / 20) * 0.15 : 0;
+
     return (
-      Math.min(1, opp.estimatedProfitUsd / 0.1) * 0.30 +
-      opp.confidence * 0.20 +
-      opp.freshnessScore * 0.15 +
-      opp.qualityScore * 0.15 +
-      (opp.latencyRisk === "LOW" ? 1 : opp.latencyRisk === "MEDIUM" ? 0.5 : 0) * 0.10 +
-      Math.min(1, opp.persistenceMs / 2000) * 0.10
+      profitScore * 0.25 +
+      confidenceScore * 0.15 +
+      freshnessScore * 0.12 +
+      qualityScore * 0.12 +
+      latencyScore * 0.08 +
+      persistScore * 0.13 +
+      grossBoost
     );
   }
 
@@ -168,31 +412,148 @@ export class ExecutableDetector {
     return Math.min(1, score);
   }
 
+  /** Route execution confidence: 0-1 score based on hop quality, freshness, stability */
+  private routeExecutionConfidence(mh: import("./spread-engine").MultiHopCandidate): number {
+    let score = 0.30; // base
+    if (mh.profitUsd > 0.01) score += 0.15;
+    if (mh.profitUsd > 0.05) score += 0.10;
+    if (mh.netBps > 10) score += 0.10;
+    if (mh.hopCount <= 3) score += 0.05; // shorter routes = higher confidence
+    if (mh.steps.every((s) => s.slippageBps < 10)) score += 0.10; // low slippage
+    if (mh.steps.every((s) => s.feeBps <= 25)) score += 0.10; // low fees
+    // Freshness bonus: all steps must be recent
+    const allFresh = mh.steps.every((s) => {
+      const edge = priceGraph.getDirectPrice(s.fromToken, s.toToken);
+      return edge && (Date.now() - edge.timestamp) < 30000;
+    });
+    if (allFresh) score += 0.10;
+    return Math.min(1, score);
+  }
+
+  getTriangularResult() { return this.lastTriangularResult; }
+
+  private liveSpreadCountdown = 0;
+  private healthCountdown = 0;
+
   private logSummary(): void {
-    if (this.opportunities.length === 0) return;
+    this.liveSpreadCountdown++;
+    this.healthCountdown++;
 
-    logSuccess("══════════ EXECUTABLE OPPORTUNITIES ══════════");
-    for (const opp of this.opportunities) {
-      const netBps = opp.netSpreadBps.toFixed(2);
-      const grossBps = opp.grossSpreadBps.toFixed(2);
-      const profitStr = opp.estimatedProfitUsd >= 0.001
-        ? `$${opp.estimatedProfitUsd.toFixed(4)}`
-        : `$${opp.estimatedProfitUsd.toFixed(6)}`;
-
-      logSuccess(`🚀 ${opp.pair}`);
-      logInfo(`  buy:  ${opp.buyDex} @ $${opp.buyPrice.toFixed(6)}`);
-      logInfo(`  sell: ${opp.sellDex} @ $${opp.sellPrice.toFixed(6)}`);
-      logInfo(`  grossSpread: ${grossBps} bps | netSpread: ${netBps} bps`);
-      logInfo(`  fees: ${opp.feesBps.toFixed(2)} bps | impact: ${opp.impactBps.toFixed(2)} bps`);
-      logInfo(`  optimalSize: ${opp.optimalSize.toFixed(3)} SOL`);
-      logInfo(`  estimatedProfit: ${profitStr}`);
-      logInfo(`  persistence: ${opp.persistenceMs.toFixed(0)}ms | confidence: ${(opp.confidence * 100).toFixed(0)}% | latency: ${opp.latencyRisk}`);
-      logInfo("");
+    if (this.opportunities.length > 0) {
+      logSuccess("══════════ EXECUTABLE OPPORTUNITIES ══════════");
+      for (const opp of this.opportunities) {
+        const isTri = opp.pair.includes("→");
+        if (isTri) {
+          const plan = opp.executionPlan;
+          logSuccess(`🔺 ${opp.pair}`);
+          if (plan) {
+            for (const step of plan.steps) {
+              const arrow = step.outputAmount >= step.inputAmount ? "→" : "→";
+              logInfo(`    ${step.hopIndex + 1}. ${step.fromSymbol} ${arrow} ${step.toSymbol} | ${step.dex} | ${step.inputAmount.toFixed(6)} → ${step.outputAmount.toFixed(6)} | fee: -${step.feeBps}bps | slip: -${step.slippageBps}bps`);
+            }
+          }
+          logInfo(`  Gross: +${opp.grossSpreadBps.toFixed(2)} bps | Fees: -${opp.feesBps.toFixed(2)} bps | Slip: -${opp.slippageBps.toFixed(2)} bps | Net: ${opp.netSpreadBps.toFixed(2)} bps`);
+          logInfo(`  Size: ${opp.optimalSize.toFixed(3)} SOL | Profit: $${opp.estimatedProfitUsd.toFixed(4)} | Conf: ${(opp.confidence * 100).toFixed(0)}%`);
+          logInfo(`  Executable: ${opp.netSpreadBps > 0.5 ? "YES" : "NO"}`);
+        } else {
+          const netBps = opp.netSpreadBps.toFixed(2);
+          const grossBps = opp.grossSpreadBps.toFixed(2);
+          logSuccess(`  ${opp.pair}`);
+          logInfo(`    buy:  ${opp.buyDex} @ $${opp.buyPrice.toFixed(6)}`);
+          logInfo(`    sell: ${opp.sellDex} @ $${opp.sellPrice.toFixed(6)}`);
+          logInfo(`    gross: ${grossBps} bps | net: ${netBps} bps | profit: $${opp.estimatedProfitUsd.toFixed(4)}`);
+        }
+      }
+      logSuccess("══════════════════════════════════════════════");
     }
-    logSuccess("══════════════════════════════════════════════");
+
+    // ── Multi-hop rejection debug when no candidates ──
+    if (this.opportunities.length === 0 && this.multiHopRejectReasons.length > 0) {
+      logInfo("");
+      logInfo(`  ⏸ MULTI-HOP REJECTED: ${this.rejectedMultiHopCount} route(s) failed atomic validation`);
+      for (const reason of this.multiHopRejectReasons.slice(0, 5)) {
+        logInfo(`     ${reason}`);
+      }
+    }
+
+    if (this.liveSpreadCountdown % 5 === 0) {
+      this.logLiveSpreads();
+    }
+    if (this.healthCountdown % 15 === 0) {
+      this.logPairHealthReport();
+    }
   }
 
   private logOpportunities(): void { }
+
+  logLiveSpreads(): void {
+    const labels = priceGraph.getPairSurfaceLabels();
+    if (labels.length === 0) return;
+
+    logSuccess("══════════════ LIVE SPREADS ══════════════");
+    const spreadRows: { pair: string; spreadBps: number }[] = [];
+
+    for (const label of labels) {
+      const surface = priceGraph.getMarketSurface(label);
+      if (!surface || surface.validCount < 2) {
+        logInfo(`${label}: < 2 valid pools`);
+        continue;
+      }
+
+      const spreadBps = surface.spreadRange;
+      spreadRows.push({ pair: label, spreadBps });
+
+      const bestAskPool = surface.pools.find((p) => p.price === surface.bestAsk);
+      const bestBidPool = surface.pools.find((p) => p.price === surface.bestBid);
+      const buyDex = bestAskPool?.dex ?? "?";
+      const sellDex = bestBidPool?.dex ?? "?";
+      const grossUsd = (surface.bestBid - surface.bestAsk) * 0.01;
+      const avgFee = surface.pools.filter((p) => p.health === "VALID" && p.price > 0)
+        .reduce((s, p) => s + p.fee, 0) / Math.max(1, surface.validCount);
+      const netBps = Math.max(0, spreadBps - avgFee * 2);
+
+      logInfo(`${label}:`);
+      logInfo(`  BUY:  ${buyDex} @ $${surface.bestAsk.toFixed(6)}`);
+      logInfo(`  SELL: ${sellDex} @ $${surface.bestBid.toFixed(6)}`);
+      logInfo(`  Spread: +${spreadBps.toFixed(2)} bps`);
+      logInfo(`  Gross: +$${grossUsd.toFixed(4)}  Fees: -${avgFee.toFixed(2)} bps  Net: +${netBps.toFixed(2)} bps`);
+      logInfo(`  Executable: ${netBps > 0.5 ? "YES" : "NO"}`);
+    }
+
+    if (spreadRows.length > 0) {
+      spreadRows.sort((a, b) => b.spreadBps - a.spreadBps);
+      const best = spreadRows[0];
+      logInfo(`Best: ${best.pair} +${best.spreadBps.toFixed(2)}bps`);
+    }
+    logSuccess("══════════════════════════════════════════════════");
+  }
+
+  logPairHealthReport(): void {
+    const labels = priceGraph.getPairSurfaceLabels();
+    if (labels.length === 0) return;
+
+    logSuccess("══════════════ PAIR HEALTH ══════════════");
+    for (const label of labels) {
+      const surface = priceGraph.getMarketSurface(label);
+      if (!surface || surface.totalCount === 0) {
+        logInfo(`${label}: NO_UPDATES`);
+        continue;
+      }
+      const valid = surface.pools.filter((p) => p.health === "VALID");
+      const stale = surface.pools.filter((p) => p.health === "STALE" || p.age > 10000);
+      const corrupted = surface.pools.filter((p) => p.health === "CORRUPTED" || p.health === "INVALID");
+      const lowLiq = surface.pools.filter((p) => p.health === "LOW_LIQUIDITY");
+
+      let status = "ACTIVE";
+      if (corrupted.length > 0) status = "CORRUPTED";
+      else if (stale.length > valid.length) status = "STALE";
+      else if (lowLiq.length > valid.length) status = "LOW_LIQUIDITY";
+      else if (valid.length === 0) status = "NO_UPDATES";
+
+      logInfo(`${label}: ${status} (${valid.length} valid, ${stale.length} stale, ${corrupted.length} corrupted)`);
+    }
+    logSuccess("═════════════════════════════════════════");
+  }
 
   getOpportunities(): ExecutableOpportunity[] { return this.opportunities; }
 
@@ -202,6 +563,8 @@ export class ExecutableDetector {
       totalOpportunities: this.totalOpportunities,
       activeCandidates: this.opportunities.length,
       detectedKeys: this.detectedKeys.size,
+      triangularCycles: this.lastTriangularResult.cyclesFound || 0,
+      triangularPaths: this.lastTriangularResult.paths?.length || 0,
       persistence: spreadPersistence.getStats(),
     };
   }
@@ -215,6 +578,7 @@ export class ExecutableDetector {
     edgeQualityScorer.reset();
     spreadPersistence.reset();
     microstructure.reset();
+    pathBuilder.reset();
   }
 }
 

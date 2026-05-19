@@ -1,7 +1,7 @@
 import { Connection, Keypair } from "@solana/web3.js";
 import dotenv from "dotenv";
 import bs58 from "bs58";
-import { MarketDataProvider, jupiterProvider, WhirlpoolProvider, RaydiumClmmProvider, DexPoolReader } from "./market";
+import { MarketDataProvider, jupiterProvider, WhirlpoolProvider, RaydiumClmmProvider, MeteoraDlmmProvider, DexPoolReader } from "./market";
 
 dotenv.config();
 
@@ -23,6 +23,7 @@ export interface BotConfig {
   scanProfitMultiplier: number;
   scanEnableTriangular: boolean;
   scanQuoteSizeSol: number;
+  scanMinGrossSpreadBps: number;
   connection: Connection;
   keypair: Keypair;
   walletPublicKey: string;
@@ -87,6 +88,7 @@ function loadConfig(): BotConfig {
   const scanMinLiquidityUsd = requireNumber("SCAN_MIN_LIQUIDITY_USD", 500_000);
   const scanProfitMultiplier = requireNumber("SCAN_PROFIT_MULTIPLIER", 2);
   const scanQuoteSizeSol = requireNumber("SCAN_QUOTE_SIZE_SOL", 0.05);
+  const scanMinGrossSpreadBps = requireNumber("SCAN_MIN_GROSS_SPREAD_BPS", 0);
 
   const dryRun = process.env.DRY_RUN !== "false";
   const debugMode = requireBool("DEBUG_MODE", false);
@@ -104,16 +106,17 @@ function loadConfig(): BotConfig {
 
   const whirlpool = new WhirlpoolProvider(connection);
   const raydium = new RaydiumClmmProvider(connection);
+  const meteora = new MeteoraDlmmProvider(connection);
 
   const config: BotConfig = {
     privateKey, rpcUrl,
     minProfitUsd, maxTradeSol, slippageBps, checkIntervalMs,
     dryRun, debugMode, quoteSizesSol,
     maxQuoteAgeMs, maxRequestsPerMin, persistenceRequired,
-    scanMaxPairs, scanMinLiquidityUsd, scanProfitMultiplier, scanEnableTriangular, scanQuoteSizeSol,
+    scanMaxPairs, scanMinLiquidityUsd, scanProfitMultiplier, scanEnableTriangular, scanQuoteSizeSol, scanMinGrossSpreadBps,
     connection, keypair, walletPublicKey,
     marketProviders: [jupiterProvider],
-    directPoolProviders: [whirlpool, raydium],
+    directPoolProviders: [whirlpool, raydium, meteora],
   };
 
   console.log("Configuración cargada:");
@@ -132,6 +135,7 @@ function loadConfig(): BotConfig {
   console.log(`   Scanner Profit Mult: ${scanProfitMultiplier}x`);
   console.log(`   Scanner Triangular:  ${scanEnableTriangular ? "ON" : "OFF"}`);
   console.log(`   Scanner Quote Size:  ${scanQuoteSizeSol} SOL`);
+  console.log(`   Scanner Min Gross:   ${scanMinGrossSpreadBps} bps (configurable, 0=dynamic)`);
   console.log(`   DEBUG MODE:          ${debugMode ? "ON" : "OFF"}`);
   console.log(`   Market Providers:    [${config.marketProviders.map((p) => p.name).join(", ")}]`);
   console.log(`   Direct Pool Readers: [${config.directPoolProviders.map((p) => p.dexName).join(", ")}]`);

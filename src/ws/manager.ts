@@ -259,6 +259,13 @@ export class WebSocketManager {
         if (staleSubs.length === this.subscriptions.size) {
           logWarning(`WS: todas las subscriptions sin updates >60s — verificando conexión`);
         }
+        // Partial stale: resubscribe individual stale subscriptions
+        if (staleSubs.length > 0 && staleSubs.length < this.subscriptions.size) {
+          logInfo(`WS: ${staleSubs.length}/${this.subscriptions.size} subscriptions stale — resubscribiendo individualmente`);
+          for (const s of staleSubs) {
+            this.resubscribeStale(`account:${s.address}`);
+          }
+        }
       }
     }
   }
@@ -284,6 +291,61 @@ export class WebSocketManager {
         this.resubscribeAll();
       }
     }, delay);
+  }
+
+  /** Get per-subscription health status: ACTIVE / STALE / DEAD */
+  getSubscriptionHealth(key: string): string {
+    const sub = this.subscriptions.get(key);
+    if (!sub) return "DEAD";
+    const age = Date.now() - sub.lastUpdate;
+    if (age < 30_000) return "ACTIVE";
+    if (age < 120_000) return "STALE";
+    return "DEAD";
+  }
+
+  /** Get health summary for all subscriptions */
+  getSubscriptionHealthReport(): Array<{ address: string; health: string; lastUpdate: number; updateCount: number; freq: number }> {
+    const report: Array<{ address: string; health: string; lastUpdate: number; updateCount: number; freq: number }> = [];
+    for (const [key, sub] of this.subscriptions) {
+      const addr = key.replace("account:", "");
+      const age = Date.now() - sub.lastUpdate;
+      const uptime = Date.now() - sub.firstUpdateTime;
+      const health = age < 30_000 ? "ACTIVE" : age < 120_000 ? "STALE" : "DEAD";
+      const freq = uptime > 0 ? (sub.updateCount / (uptime / 1000)) : 0;
+      report.push({ address: addr.substring(0, 8), health, lastUpdate: age, updateCount: sub.updateCount, freq: Math.round(freq * 100) / 100 });
+    }
+    return report;
+  }
+
+  /** Resubscribe a single stale subscription without reconnecting everything */
+  resubscribeStale(key: string): boolean {
+    const sub = this.subscriptions.get(key);
+    if (!sub) return false;
+    if (Date.now() - sub.lastUpdate < 30_000) return true; // still active
+
+    logInfo(`WS: resubscribiendo subscription stale ${key.substring(0, 20)}... (last update ${(Date.now() - sub.lastUpdate) / 1000}s ago)`);
+    if (sub.unsubscribe) sub.unsubscribe();
+    this.subscriptions.delete(key);
+
+    if (sub.type === "account") {
+      this.subscribeAccount(sub.address, sub.callback);
+      this.droppedSubscriptions++;
+    }
+    return true;
+  }
+
+  /** Resubscribe all stale subscriptions */
+  resubscribeStaleAll(): number {
+    let count = 0;
+    const now = Date.now();
+    for (const [key, sub] of this.subscriptions) {
+      if (now - sub.lastUpdate > 30_000) {
+        this.resubscribeStale(key);
+        count++;
+      }
+    }
+    if (count > 0) logInfo(`WS: ${count} subscriptions stale resubscribed`);
+    return count;
   }
 
   private resubscribeAll(): void {

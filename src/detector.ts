@@ -1,7 +1,7 @@
 import { BotConfig } from "./config";
-import { logInfo, logSuccess } from "./logger";
+import { logInfo, logSuccess, logWarning } from "./logger";
 import { marketValidator } from "./market-validator";
-import { executableDetector, surfaceEngine, ExecutableOpportunity } from "./engine";
+import { executableDetector, surfaceEngine, pathBuilder, ExecutableOpportunity } from "./engine";
 import { priceGraph } from "./graph";
 
 export interface LocalOpportunityCandidate {
@@ -32,6 +32,7 @@ const CACHE_TTL_MS = 10_000;
 const MAX_CANDIDATES = 20;
 
 function oppToCandidate(opp: ExecutableOpportunity): LocalOpportunityCandidate {
+  const isTri = opp.pair.includes("→");
   return {
     pair: opp.pair,
     symbolA: opp.symbolA,
@@ -42,12 +43,8 @@ function oppToCandidate(opp: ExecutableOpportunity): LocalOpportunityCandidate {
     dexSell: opp.sellDex,
     priceBuy: opp.buyPrice,
     priceSell: opp.sellPrice,
-    spreadPct: opp.grossSpreadBps / 100,
-    liquidity: Math.min(
-      ...surfaceEngine.getSurface(opp.pair)?.pools
-        .filter((p) => [opp.buyPool, opp.sellPool].includes(p.poolAddress))
-        .map((p) => p.liquidity) || [0],
-    ),
+    spreadPct: isTri ? opp.netSpreadBps / 100 : opp.grossSpreadBps / 100,
+    liquidity: 100_000_000,
     confidence: opp.confidence,
     detectedAt: opp.detectedAt,
   };
@@ -82,10 +79,11 @@ class GraphDetector {
   private candidates: LocalOpportunityCandidate[] = [];
   private totalScans = 0;
   private totalCandidates = 0;
+  private lastHeartbeat = 0;
 
   start(): void {
     executableDetector.start();
-    logInfo("GraphDetector: delegando a ExecutableDetector + SurfaceEngine");
+    logInfo("GraphDetector: delegando a ExecutableDetector + PathBuilder + SurfaceEngine");
   }
 
   scanGraph(): LocalOpportunityCandidate[] {
@@ -104,13 +102,52 @@ class GraphDetector {
       logSuccess(`GraphDetector: ${found.length} oportunidad(es) — ${found[0].pair} spread=${found[0].spreadPct.toFixed(4)}%`);
     }
 
-    if (this.totalScans % 5 === 0) {
-      for (const label of priceGraph.getPairSurfaceLabels()) {
-        surfaceEngine.printSurfaceReport(label);
-      }
+    if (this.totalScans % 10 === 0 || Date.now() - this.lastHeartbeat > 30000) {
+      this.printHeartbeat();
+      this.lastHeartbeat = Date.now();
     }
 
     return this.candidates;
+  }
+
+  private printHeartbeat(): void {
+    const uptimeSec = Math.max(1, 1);
+    const scansPerSec = (this.totalScans / uptimeSec).toFixed(2);
+    const pathsPerSec = (this.totalCandidates / uptimeSec).toFixed(4);
+    const triRes = executableDetector.getTriangularResult();
+    const edgeCount = priceGraph.getValidEdgeCount();
+    const nodeCount = priceGraph.getNodeCount();
+    const activeOpps = executableDetector.getOpportunities();
+
+    logSuccess("══════════ DETECTOR HEARTBEAT ════════");
+    logInfo(`Detector: ACTIVE`);
+    logInfo(`Scans/sec: ${scansPerSec}`);
+    logInfo(`Paths/sec: ${pathsPerSec}`);
+    logInfo(`Routes: ${triRes?.paths?.length || 0} triangular, ${Math.max(0, activeOpps.length - (triRes?.paths?.length || 0))} direct`);
+    logInfo(`Candidates: ${this.totalCandidates}`);
+    logInfo(`Executable: ${this.candidates.length}`);
+    logInfo(`Rejected: ${this.totalScans - this.candidates.length}`);
+    logInfo(`  stale: ${triRes?.rejectedStale || 0}`);
+    logInfo(`  low liquidity: ${triRes?.rejectedSlippage || 0}`);
+    logInfo(`  fees: ${triRes?.rejectedFees || 0}`);
+    logInfo(`  disconnected: ${triRes?.rejectedDisconnected || 0}`);
+    logInfo(`  duplicate: ${triRes?.rejectedDuplicate || 0}`);
+    logInfo(`Graph: ${nodeCount} nodes, ${edgeCount} edges`);
+    logSuccess("═══════════════════════════════════════");
+
+    if (this.candidates.length > 0) {
+      const bestOpp = this.candidates.reduce((a, b) => a.confidence > b.confidence ? a : b);
+      logSuccess("══════════ SESSION METRICS ════════");
+      logInfo(`Scans: ${this.totalScans}`);
+      logInfo(`Cycles: ${triRes?.cyclesFound || 0}`);
+      logInfo(`Candidates: ${this.totalCandidates}`);
+      logInfo(`Executable: ${this.candidates.length}`);
+      logInfo(`Best: ${bestOpp.pair} spread=${bestOpp.spreadPct.toFixed(4)}%`);
+      logInfo(`Realtime graph health: ${edgeCount > 0 && nodeCount > 2 ? "100%" : "0%"}`);
+      logSuccess("═════════════════════════════════════");
+    } else {
+      logWarning(`Session: ${this.totalScans} scans, ${triRes?.cyclesFound || 0} cycles, 0 executable — graph needs more liquidity`);
+    }
   }
 
   getCandidates(): LocalOpportunityCandidate[] {

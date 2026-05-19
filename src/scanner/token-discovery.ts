@@ -34,10 +34,11 @@ const HIGH_VALUE_MINTS: Record<string, string> = {
   "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": "RAY",
   "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE": "ORCA",
   "pythWSnswVUd12oZpeFP8e9CVaEqJg25g1Vtc2biYPD": "PYTH",
-  "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL": "JTO",
-  "METAewgxyPjwsTESkdUbnBshXrUMCLaYqFR2TewKxBg": "META",
-  "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": "mSOL",
-  "7dHbWXmci3dT8UFYWYZweBL5Gq6tXFGoeMG85qNBYtC": "BST",
+    "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL": "JTO",
+    "METAewgxyPjwsTESkdUbnBshXrUMCLaYqFR2TewKxBg": "META",
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": "mSOL",
+    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": "jitoSOL",
+    "7dHbWXmci3dT8UFYWYZweBL5Gq6tXFGoeMG85qNBYtC": "BST",
   "HjpQZQ3Lhp5WN32MFMks7boEADPPvA7sA5L6bQK2P3C": "POPCAT",
   "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5": "MEW",
   "ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82": "BOME",
@@ -61,11 +62,18 @@ export class TokenDiscovery {
   private seedKnownTokens(): void {
     for (const [mint, symbol] of Object.entries(HIGH_VALUE_MINTS)) {
       if (!this.tokens.has(mint)) {
+        const knownDecimals = TOKEN_MINTS[mint];
+        let decimals: number;
+        if (knownDecimals !== undefined) {
+          decimals = knownDecimals;
+        } else {
+          decimals = (symbol === "SOL" || symbol === "mSOL" || symbol === "jitoSOL") ? 9 : 6;
+        }
         this.tokens.set(mint, {
           mint,
           symbol,
           name: symbol,
-          decimals: TOKEN_MINTS[mint] !== undefined ? 6 : 9,
+          decimals,
           liquidityUsd: 1_000_000,
           dailyVolumeUsd: 5_000_000,
           priceUsd: symbol === "SOL" ? 160 : 1,

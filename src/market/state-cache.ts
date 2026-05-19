@@ -55,6 +55,10 @@ export class MarketStateCache {
     "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK",
     "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm": "WIF",
     "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": "RAY",
+    "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr": "POPCAT",
+    "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3": "PYTH",
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": "mSOL",
+    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": "jitoSOL",
   };
   private symbolToMint: Record<string, string> = {};
 
@@ -138,11 +142,16 @@ export class MarketStateCache {
         return false;
       }
 
-      if (snapshot.dataQuality === "VALID") return true;
-
+      // Always validate computed spot price regardless of dataQuality
       const spotPrice = Math.pow(sqrtApprox, 2) * Math.pow(10, snapshot.decimalsA - snapshot.decimalsB);
-      if (!isFinite(spotPrice) || spotPrice <= 0) return false;
-      if (spotPrice > 1_000_000) return false;
+      if (!isFinite(spotPrice) || spotPrice <= 0) {
+        logDebug(`isValidPoolData [${snapshot.poolAddress.substring(0, 8)}]: spotPrice ${spotPrice} inválida`);
+        return false;
+      }
+      if (spotPrice > 1e15) {
+        logDebug(`isValidPoolData [${snapshot.poolAddress.substring(0, 8)}]: spotPrice ${spotPrice.toExponential(2)} fuera de rango`);
+        return false;
+      }
 
       return true;
     } catch {
@@ -151,9 +160,25 @@ export class MarketStateCache {
   }
 
   updatePool(snapshot: PoolStateSnapshot): void {
-    if (snapshot.dataQuality !== "VALID" && snapshot.source === "INVALID") return;
+    if (snapshot.dataQuality !== "VALID") return;
+
+    if (!MarketStateCache.isValidPoolData(snapshot)) {
+      logDebug(`StateCache: isValidPoolData RECHAZÓ pool ${snapshot.poolAddress.substring(0, 8)}... — saltando`);
+      return;
+    }
 
     const existing = this.pools.get(snapshot.poolAddress);
+
+    // ── Preserve last valid snapshot ──
+    // If the new snapshot has zero price/liquidity but the existing one is valid, KEEP the old one
+    if (existing && existing.sqrtPriceX64 !== "0" && existing.liquidity !== "0") {
+      const newSqrt = BigInt(snapshot.sqrtPriceX64);
+      const newLiq = BigInt(snapshot.liquidity);
+      if (newSqrt <= 0n || newLiq <= 0n) {
+        logDebug(`StateCache: preservando último snapshot válido para ${snapshot.poolAddress.substring(0, 8)}... — nuevo sqrt=${snapshot.sqrtPriceX64} liq=${snapshot.liquidity}`);
+        return;
+      }
+    }
 
     if (snapshot.slot > 0 && existing && existing.slot > snapshot.slot) {
       this.slotWarnings++;
@@ -240,7 +265,7 @@ export class MarketStateCache {
       logDebug(`buildPairLabel: mint no reconocido — A="${mintA.substring(0, 12)}..." (${symA || "?"}) B="${mintB.substring(0, 12)}..." (${symB || "?"})`);
       return null;
     }
-    const priority = ["SOL", "USDC", "USDT", "WIF", "RAY", "JUP", "BONK"];
+    const priority = ["SOL", "USDC", "USDT", "JUP", "WIF", "RAY", "BONK", "POPCAT", "PYTH", "mSOL", "jitoSOL"];
     return priority.indexOf(symA) < priority.indexOf(symB) ? `${symA}/${symB}` : `${symB}/${symA}`;
   }
 
@@ -253,9 +278,17 @@ export class MarketStateCache {
         logDebug(`Spot price inválido: ${spotPrice} (raw=${rawPrice}, sqrt=${snapshot.sqrtPriceX64}, decimalsA=${snapshot.decimalsA}, decimalsB=${snapshot.decimalsB})`);
         return 0;
       }
-      const inverted = this.isPoolInverted(snapshot.poolAddress);
-      if (inverted && spotPrice > 0) {
-        spotPrice = 1 / spotPrice;
+      // Normalize price to canonical label direction (base/quote by priority)
+      // raw price is always price(mintA in mintB), but the label may reorder mints
+      const symA = this.knownMints[snapshot.mintA];
+      const symB = this.knownMints[snapshot.mintB];
+      if (symA && symB) {
+        const priority = ["SOL", "USDC", "USDT", "JUP", "WIF", "RAY", "BONK", "POPCAT", "PYTH", "mSOL", "jitoSOL"];
+        // If symB has higher priority than symA, label will be symB/symA,
+        // but raw price is symA/symB → invert
+        if (priority.indexOf(symB) < priority.indexOf(symA)) {
+          spotPrice = 1 / spotPrice;
+        }
       }
       return spotPrice;
     } catch (err) {

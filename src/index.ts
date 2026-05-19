@@ -1,5 +1,6 @@
+import { Connection, PublicKey } from "@solana/web3.js";
 import { config } from "./config";
-import { detectOpportunities, isOpportunityValid } from "./detector";
+import { detectOpportunities, isOpportunityValid, graphDetector } from "./detector";
 import { executeAll } from "./executor";
 import {
   logInfo, logError, logSuccess, logWarning, logBotHeader, logHealthMetrics, printSessionMetrics, SessionMetrics, logDebug,
@@ -13,13 +14,15 @@ import { WebSocketManager } from "./ws";
 import { marketState, WhirlpoolProvider } from "./market";
 import { pairState } from "./pair-state";
 import { priceGraph } from "./graph";
-import { surfaceEngine, executableDetector, printNetworkReport } from "./engine";
+import { surfaceEngine, executableDetector, spreadEngine, printNetworkReport, poolHealthMonitor } from "./engine";
 import { eventScheduler } from "./scheduler";
 import { marketValidator } from "./market-validator";
 import { POOL_REGISTRY, getPoolSummary } from "./config/pools";
 import { sqrtPriceX64ToPrice } from "./math";
 import { stateConsistency } from "./state-consistency";
 import { Scanner, tokenDiscovery, quoteEngine } from "./scanner";
+import { validatePoolFields as validateWsFields } from "./market/account-validator";
+import { accountMetrics } from "./market/account-metrics";
 
 let wsManager: WebSocketManager | null = null;
 let scanner: Scanner | null = null;
@@ -70,6 +73,8 @@ async function attachWsToProviders(): Promise<void> {
       logDebug(`  ${provider.dexName}: WS asociado`);
     }
   }
+  poolHealthMonitor.attachWs(wsManager);
+  logDebug("  PoolHealthMonitor: WS asociado");
 }
 
 async function startProviders(): Promise<void> {
@@ -129,35 +134,44 @@ async function subscribePools(): Promise<number> {
   for (const entry of POOL_REGISTRY) {
     if (wsManager && entry.address) {
       const isWhirlpool = entry.dex === "Whirlpool";
+      // Only subscribe directly for Whirlpool pools — other DEXes manage their own WS via trackPool
+      if (!isWhirlpool) {
+        logDebug(`  Saltando WS directa para ${entry.dex} pool ${entry.address.substring(0, 12)}... (gestionada por provider)`);
+        continue;
+      }
       logDebug(`  WS subscription directa para ${entry.address.substring(0, 12)}... (${entry.dex})`);
       const subKey = wsManager.subscribeAccount(entry.address, (data, slot) => {
-        if (!data || data.length < 150) return;
-        if (isWhirlpool) {
-          const parsed = parseWsUpdateDirect(data);
-          if (!parsed) return;
-          const { sqrtPrice, liquidity, tickCurrentIndex } = parsed;
-          if (sqrtPrice && liquidity !== undefined) {
-            const snapshot: import("./market/state-cache").PoolStateSnapshot = {
-              poolAddress: entry.address,
-              dex: entry.dex,
-              mintA: entry.mintA,
-              mintB: entry.mintB,
-              decimalsA: entry.decimalsA,
-              decimalsB: entry.decimalsB,
-              sqrtPriceX64: sqrtPrice.toString(),
-              liquidity: liquidity.toString(),
-              tick: tickCurrentIndex,
-              fee: entry.feeBps,
-              slot,
-              timestamp: Date.now(),
-              dataQuality: "VALID",
-              source: "ON_CHAIN_VALIDATED",
-            };
-            marketState.updatePool(snapshot);
-            const pool = marketState.getPool(entry.address);
-            if (pool) priceGraph.updateFromPool(pool);
-            logDebug(`WS direct [${entry.address.substring(0, 8)}]: slot=${slot} update → cache: ${marketState.getPoolCount()} pools`);
-          }
+        if (!data || data.length < 85) return;
+        const parsed = parseWsUpdateDirect(data, slot);
+        if (!parsed) return;
+        const { sqrtPrice, liquidity, tickCurrentIndex } = parsed;
+        if (sqrtPrice && liquidity !== undefined) {
+          // Use correct on-chain mint order for decimals (registry may differ)
+          const isInverted = marketState.isPoolInverted(entry.address);
+          const mintA = isInverted ? entry.mintB : entry.mintA;
+          const mintB = isInverted ? entry.mintA : entry.mintB;
+          const decimalsA = isInverted ? entry.decimalsB : entry.decimalsA;
+          const decimalsB = isInverted ? entry.decimalsA : entry.decimalsB;
+          const snapshot: import("./market/state-cache").PoolStateSnapshot = {
+            poolAddress: entry.address,
+            dex: entry.dex,
+            mintA,
+            mintB,
+            decimalsA,
+            decimalsB,
+            sqrtPriceX64: sqrtPrice.toString(),
+            liquidity: liquidity.toString(),
+            tick: tickCurrentIndex,
+            fee: entry.feeBps,
+            slot,
+            timestamp: Date.now(),
+            dataQuality: "VALID",
+            source: "ON_CHAIN_VALIDATED",
+          };
+          marketState.updatePool(snapshot);
+          const pool = marketState.getPool(entry.address);
+          if (pool) priceGraph.updateFromPool(pool);
+          logDebug(`WS direct [${entry.address.substring(0, 8)}]: slot=${slot} update → cache: ${marketState.getPoolCount()} pools`);
         }
       }, "confirmed");
       if (subKey) {
@@ -168,6 +182,13 @@ async function subscribePools(): Promise<number> {
       }
     }
   }
+
+  // Sync graph with pool data loaded by providers (their WS events may arrive later)
+  let synced = 0;
+  for (const p of marketState.getAllPools()) {
+    priceGraph.updateFromPool(p); synced++;
+  }
+  if (synced > 0) logDebug(`Graph sync: ${synced} pools seeded desde marketState`);
 
   logInfo(`  Provider subscriptions: ${providerSubscribed} | WS direct subscriptions: ${subscribed}`);
 
@@ -181,10 +202,31 @@ async function subscribePools(): Promise<number> {
   return subscribed + providerSubscribed;
 }
 
-function parseWsUpdateDirect(data: Buffer): { sqrtPrice: bigint; liquidity: bigint; tickCurrentIndex: number } | null {
+function parseWsUpdateDirect(data: Buffer, slot: number): { sqrtPrice: bigint; liquidity: bigint; tickCurrentIndex: number } | null {
   try {
     if (data.length < 85) {
       logDebug(`WS parse: datos insuficientes (${data.length} bytes, mínimo 85)`);
+      return null;
+    }
+
+    const vfields = validateWsFields(
+      data.readInt32LE(81),
+      (data.readBigUInt64LE(65) + (data.readBigUInt64LE(73) << 64n)),
+      (data.readBigUInt64LE(49) + (data.readBigUInt64LE(57) << 64n)),
+      data.readUInt16LE(45),
+    );
+    if (!vfields.valid) {
+      // Hex dump on rejection to capture raw WS data for debugging
+      const hexDump = (start: number, len: number) =>
+        data.subarray(start, start + len).toString("hex").match(/.{1,2}/g)?.join(" ") || "";
+      const addrMatch = data.length >= 132
+        ? data.subarray(101, 133).toString("hex") : "N/A";
+      logDebug(`WS parse ${vfields.reason}: ${vfields.detail || ""} (slot=${slot}, ${data.length}B)`);
+      logDebug(`  hex[49..64] liq:    ${hexDump(49, 16)}`);
+      logDebug(`  hex[65..80] sqrt:   ${hexDump(65, 16)}`);
+      logDebug(`  hex[81..84] tick:   ${hexDump(81, 4)}`);
+      logDebug(`  hex[101..132] mint: ${addrMatch}`);
+      accountMetrics.recordRejection("Whirlpool", vfields.reason!, slot);
       return null;
     }
 
@@ -210,33 +252,7 @@ function parseWsUpdateDirect(data: Buffer): { sqrtPrice: bigint; liquidity: bigi
 
     const tickCurrentIndex = data.readInt32LE(81);
 
-    if (sqrtPrice === 0n) {
-      logDebug(`WS parse: sqrtPrice=0 — NO actualizando`);
-      return null;
-    }
-
-    if (tickCurrentIndex < -500000 || tickCurrentIndex > 500000) {
-      logDebug(`WS parse: tick=${tickCurrentIndex} fuera de rango — INVALIDANDO`);
-      return null;
-    }
-
-    const sqrtNum = Number(sqrtPrice);
-    const sqrtApprox = sqrtNum / 2 ** 64;
-    if (sqrtApprox > 1e10 || (sqrtApprox > 0 && sqrtApprox < 1e-8)) {
-      logDebug(`WS parse: sqrtPriceQ64=${sqrtPrice.toString()} (≈${sqrtApprox.toExponential(2)}) fuera de rango — INVALIDANDO`);
-      return null;
-    }
-
-    if (liquidity === 0n) {
-      logDebug(`WS parse: liquidity=0 — pool vacío`);
-      return null;
-    }
-
-    const liqNum = Number(liquidity);
-    if (!isFinite(liqNum) || liqNum > 1e18) {
-      logDebug(`WS parse: liquidity=${liqNum.toExponential(2)} absurda — INVALIDANDO`);
-      return null;
-    }
+    accountMetrics.recordParseSuccess("Whirlpool");
 
     if (DEBUG_MODE) {
       logDebug(`WS parse OK: sqrtPriceQ64=${sqrtPrice.toString()} tick=${tickCurrentIndex} liq=${liquidity.toString()}`);
@@ -244,6 +260,7 @@ function parseWsUpdateDirect(data: Buffer): { sqrtPrice: bigint; liquidity: bigi
 
     return { sqrtPrice, liquidity, tickCurrentIndex };
   } catch {
+    accountMetrics.recordParseFailure("Whirlpool");
     return null;
   }
 }
@@ -307,6 +324,7 @@ async function initialize(): Promise<boolean> {
     }
   });
 
+  spreadEngine.start();
   eventScheduler.enableWatchdog(wsManager ?? undefined);
 
   const dataOk = await verifyMarketCache(12000);
@@ -453,11 +471,27 @@ async function mainLoop(): Promise<void> {
         marketStatusCountdown = 30;
       }
 
+      // SpreadEngine runs event-driven via pool:update subscription
       if (healthCountdown <= 0) {
         const health = analytics.getHealth();
-        logInfo(`Health: pools=${health.pools} pairs=${health.pairs} updates=${health.updates}`);
+        const detectorStats = graphDetector.getStats();
+        const totalTimeSec = Math.max(1, (Date.now() - metrics.startTime.getTime()) / 1000);
+        const scansPerSec = (detectorStats.totalScans / totalTimeSec).toFixed(2);
+        const pathsPerSec = (detectorStats.totalCandidates / totalTimeSec).toFixed(2);
+
+        logSuccess(`══════════ DETECTOR HEARTBEAT ══════════`);
+        logInfo(`Detector: ACTIVE`);
+        logInfo(`Scans/sec: ${scansPerSec}`);
+        logInfo(`Paths/sec: ${pathsPerSec}`);
+        logInfo(`Candidates: ${detectorStats.totalCandidates}`);
+        logInfo(`Valid: ${detectorStats.candidates}`);
+        logInfo(`Rejected: ${detectorStats.totalScans - detectorStats.candidates}`);
         logInfo(`Graph: ${health.graphNodes} nodos, ${health.graphEdges} edges`);
-        logInfo(`Detector: ${health.scans} scans, ${health.candidates} candidatos`);
+        const profit = spreadEngine.getTheoreticalProfit();
+        const hrs = (profit.elapsedSec / 3600).toFixed(1);
+        logInfo(`💰 Theoretical P&L: ${profit.totalUsd >= 0 ? '+' : ''}$${profit.totalUsd.toFixed(2)} USDC (${hrs}h)`);
+        logSuccess("═══════════════════════════════════════════");
+
         if (scanner) {
           const s = scanner.getStats();
           logInfo(`Scanner: ${s.scanCount} scans, ${s.totalOpportunities} opps, ${s.pairs} pares, ${s.tokens} tokens, ${s.routeStats.totalRoutesFound} rutas`);
@@ -480,12 +514,17 @@ async function mainLoop(): Promise<void> {
         const consistencyReport = stateConsistency.check(marketState, priceGraph);
         stateConsistency.printReport(consistencyReport);
 
+        accountMetrics.printSummary();
+
         if (priceGraph.getEdgeCount() > 0) {
           priceGraph.printGraphSummary();
           printNetworkReport();
           for (const label of priceGraph.getPairSurfaceLabels()) {
-            surfaceEngine.printSurfaceReport(label);
+              surfaceEngine.printSurfaceReport(label);
           }
+
+          executableDetector.logLiveSpreads();
+          executableDetector.logPairHealthReport();
         }
 
         const engStats = executableDetector.getStats();
@@ -493,8 +532,32 @@ async function mainLoop(): Promise<void> {
         const surfStats = surfaceEngine.getStats();
         logInfo(`Surface: ${surfStats.cachedSurfaces} surfaces cacheadas, ${surfStats.calculations} cálculos`);
 
+        const execOpps = executableDetector.getOpportunities();
+        if (execOpps.length > 0) {
+          logSuccess("══════════ TOP OPPORTUNITIES ══════════");
+          for (let idx = 0; idx < Math.min(execOpps.length, 5); idx++) {
+            const opp = execOpps[idx];
+            logInfo(`#${idx + 1} ${opp.pair}: +${opp.netSpreadBps.toFixed(2)} net bps | +$${opp.estimatedProfitUsd.toFixed(4)}`);
+          }
+          logSuccess("══════════════════════════════════════════════");
+        }
+
         if (circuitBreaker.isDegraded()) {
           logWarning(`Circuit Breaker: DEGRADADO — ${circuitBreaker.getState().consecutiveFailures} fallos`);
+        }
+
+        // ── Pool stale detection + auto resubscribe ──
+        if (wsManager) {
+          const staleCount = poolHealthMonitor.checkStaleSubscriptions().length;
+          if (staleCount > 0) {
+            const resubbed = await poolHealthMonitor.resubscribeStale();
+            if (resubbed > 0) {
+              logInfo(`PoolHealth: ${resubbed} subscriptions re-creadas`);
+            }
+          }
+          // Hybrid WS + RPC refresh: fetch stale pools directly via RPC
+          await hybridRefreshStalePools();
+          poolHealthMonitor.printPoolHealthPanel();
         }
 
         analytics.resetWindow();
@@ -514,6 +577,98 @@ async function mainLoop(): Promise<void> {
         await sleep(config.checkIntervalMs);
       }
     }
+  }
+}
+
+/**
+ * Hybrid WS + RPC fallback refresh.
+ * For pools whose WS updates have stopped (>30s stale), fetch raw account data
+ * directly via RPC and update the state cache. This keeps pools alive even when
+ * they have no trading activity (no WS events).
+ */
+const HYBRID_REFRESH_COOLDOWN_MS = 25_000;
+let lastHybridRefresh = 0;
+
+async function hybridRefreshStalePools(): Promise<void> {
+  const now = Date.now();
+  if (now - lastHybridRefresh < HYBRID_REFRESH_COOLDOWN_MS) return;
+  lastHybridRefresh = now;
+
+  const rpcConnection = new Connection(config.rpcUrl, { commitment: "confirmed" });
+  let refreshed = 0;
+  const currentSlot = await rpcConnection.getSlot("confirmed").catch(() => 0);
+
+  for (const entry of POOL_REGISTRY) {
+    const poolSnapshot = marketState.getPool(entry.address);
+    const lastUpdate = poolSnapshot ? now - poolSnapshot.timestamp : Infinity;
+    const hasInvalidSlot = !poolSnapshot || poolSnapshot.slot <= 0;
+
+    // Refresh stale pools OR pools with invalid slot
+    if (lastUpdate < 15_000 && !hasInvalidSlot) continue;
+
+    try {
+      const pubkey = new PublicKey(entry.address);
+      const acc = await rpcConnection.getAccountInfo(pubkey);
+
+      if (!acc || acc.data.length < 85) continue;
+
+      if (entry.dex === "Whirlpool") {
+        // Parse Whirlpool account data directly
+        const parsed = parseWsUpdateDirect(acc.data, 0);
+        if (!parsed || !parsed.sqrtPrice) continue;
+
+        // Refresh cache with current on-chain data
+        const vfields = validateWsFields(
+          acc.data.readInt32LE(81),
+          BigInt(parsed.sqrtPrice.toString()),
+          BigInt(parsed.liquidity.toString()),
+          entry.feeBps,
+        );
+        if (!vfields.valid) continue;
+
+        const snapshot: import("./market/state-cache").PoolStateSnapshot = {
+          poolAddress: entry.address,
+          dex: entry.dex,
+          mintA: entry.mintA,
+          mintB: entry.mintB,
+          decimalsA: entry.decimalsA,
+          decimalsB: entry.decimalsB,
+          sqrtPriceX64: parsed.sqrtPrice.toString(),
+          liquidity: parsed.liquidity.toString(),
+          tick: parsed.tickCurrentIndex,
+          fee: entry.feeBps,
+          slot: currentSlot > 0 ? currentSlot : (poolSnapshot?.slot || 0),
+          timestamp: now,
+          dataQuality: "VALID",
+          source: "FALLBACK",
+        };
+        marketState.updatePool(snapshot);
+        const pool = marketState.getPool(entry.address);
+        if (pool) priceGraph.updateFromPool(pool);
+        refreshed++;
+      } else {
+        // Non-Whirlpool pools: re-submit existing snapshot with fresh timestamp + slot fix
+        if (poolSnapshot) {
+          const refreshedSnapshot = { ...poolSnapshot, timestamp: now };
+          if (refreshedSnapshot.slot <= 0 && currentSlot > 0) {
+            refreshedSnapshot.slot = currentSlot;
+          }
+          marketState.updatePool(refreshedSnapshot);
+          const pool = marketState.getPool(entry.address);
+          if (pool) priceGraph.updateFromPool(pool);
+          logDebug(`HybridRefresh: ${entry.dex} pool ${entry.address.substring(0, 8)}... refreshed (${acc.data.length}B)`);
+          refreshed++;
+        } else {
+          logDebug(`HybridRefresh: ${entry.dex} pool ${entry.address.substring(0, 8)}... sin cache previo — skipping`);
+        }
+      }
+    } catch (err) {
+      logDebug(`HybridRefresh: pool ${entry.address.substring(0, 8)}... falló RPC: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  if (refreshed > 0) {
+    logInfo(`HybridRefresh: ${refreshed} pools refrescados via RPC fallback`);
   }
 }
 
