@@ -195,6 +195,27 @@ export class SpreadEngine {
     const bestBid = allPools[allPools.length - 1];
     const spreadBps = bestAsk.price > 0 ? ((bestBid.price - bestAsk.price) / bestAsk.price) * 10000 : 0;
 
+    // ── Freshness consensus check ──
+    // Reject comparison if slot/age difference exceeds freshness bounds
+    const slotDelta = Math.abs(bestAsk.slot - bestBid.slot);
+    const ageDeltaMs = Math.abs(bestAsk.age - bestBid.age);
+    const MAX_SLOT_DELTA = 3;
+    const MAX_AGE_DELTA_MS = 500;
+    if (slotDelta > MAX_SLOT_DELTA || ageDeltaMs > MAX_AGE_DELTA_MS) {
+      logDebug(`SKIP_COMPARISON: ${pair} slotΔ=${slotDelta} ageΔ=${ageDeltaMs}ms exceeds freshness consensus (max slotΔ=${MAX_SLOT_DELTA} max ageΔ=${MAX_AGE_DELTA_MS}ms) — ${bestAsk.dex} age=${bestAsk.age}ms slot=${bestAsk.slot} vs ${bestBid.dex} age=${bestBid.age}ms slot=${bestBid.slot}`);
+      const info: PairSurfaceInfo = { pair, pools: allPools, bestAsk: bestAsk.price, bestBid: bestBid.price, spreadBps: 0, simulations: [] };
+      this.surfaces.set(pair, info);
+      return [];
+    }
+
+    // ── Cross-DEX only check ──
+    if (bestAsk.dex === bestBid.dex) {
+      logDebug(`PAIR_ARB_REJECTED: ${pair} same-dex opportunity ${bestAsk.dex}→${bestBid.dex} — rejecting`);
+      const info: PairSurfaceInfo = { pair, pools: allPools, bestAsk: bestAsk.price, bestBid: bestBid.price, spreadBps: 0, simulations: [] };
+      this.surfaces.set(pair, info);
+      return [];
+    }
+
     // Track spread history
     if (!this.spreadHistory.has(pair)) this.spreadHistory.set(pair, []);
     const history = this.spreadHistory.get(pair)!;

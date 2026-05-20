@@ -47,6 +47,37 @@ export class MarketStateCache {
   private stalePoolCleanups = 0;
   private mintOrderMap = new Map<string, { onChainMintA: string; onChainMintB: string }>();
   private invalidPools = new Set<string>(); // pools blacklisted after repeated failures
+  private poolStrikes = new Map<string, number>(); // pool address → consecutive invalid updates
+  private readonly MAX_STRIKES = 5;
+  private disabledPools = new Set<string>(); // pools disabled after MAX_STRIKES
+
+  /** Record an invalid update for a pool (consecutive failures) */
+  recordInvalidUpdate(address: string): void {
+    const strikes = (this.poolStrikes.get(address) || 0) + 1;
+    this.poolStrikes.set(address, strikes);
+    if (strikes >= this.MAX_STRIKES) {
+      this.disabledPools.add(address);
+      this.invalidPools.add(address);
+      logInfo(`POOL_DISABLED: ${address.substring(0, 8)}... invalid ${strikes} consecutive times`);
+    }
+  }
+
+  /** Record a successful update (reset strikes) */
+  recordValidUpdate(address: string): void {
+    this.poolStrikes.delete(address);
+  }
+
+  isDisabled(address: string): boolean {
+    return this.disabledPools.has(address);
+  }
+
+  getDisabledCount(): number {
+    return this.disabledPools.size;
+  }
+
+  getDisabledPools(): string[] {
+    return Array.from(this.disabledPools);
+  }
 
   private knownMints: Record<string, string> = {
     "So11111111111111111111111111111111111111112": "SOL",
@@ -380,7 +411,7 @@ export class MarketStateCache {
     return Array.from(this.invalidPools);
   }
 
-  getStats(): { pools: number; pairs: number; updates: number; uptime: number; slotWarnings: number; staleCleanups: number; blacklisted: number; pairDetails: Array<{ label: string; updates: number; price: number; age: number }> } {
+  getStats(): { pools: number; pairs: number; updates: number; uptime: number; slotWarnings: number; staleCleanups: number; blacklisted: number; disabled: number; pairDetails: Array<{ label: string; updates: number; price: number; age: number }> } {
     return {
       pools: this.pools.size,
       pairs: this.pairs.size,
@@ -389,6 +420,7 @@ export class MarketStateCache {
       slotWarnings: this.slotWarnings,
       staleCleanups: this.stalePoolCleanups,
       blacklisted: this.invalidPools.size,
+      disabled: this.disabledPools.size,
       pairDetails: Array.from(this.pairs.values()).map((p) => ({
         label: p.label,
         updates: p.updateCount,

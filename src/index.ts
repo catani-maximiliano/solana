@@ -576,7 +576,33 @@ async function mainLoop(): Promise<void> {
           }
           // Hybrid WS + RPC refresh: fetch stale pools directly via RPC
           await hybridRefreshStalePools();
-          poolHealthMonitor.printPoolHealthPanel();
+
+          // ── Health consensus summary ──
+          const cacheStats = marketState.getStats();
+          const edgeMetrics = priceGraph.getEdgeMetrics();
+          const labels = priceGraph.getPairSurfaceLabels();
+          let freshPairs = 0, stalePairs = 0, maxSlotDivergence = 0, maxAgeDivergenceMs = 0;
+          for (const label of labels) {
+            const surface = priceGraph.getMarketSurface(label);
+            if (!surface || surface.pools.length < 2) continue;
+            const valid = surface.pools.filter(p => p.health === "VALID" && p.price > 0);
+            const fresh = valid.filter(p => p.age < 5000);
+            if (fresh.length >= 2) freshPairs++;
+            else stalePairs++;
+            for (const p of valid) {
+              if (p.slot > 0 && Math.abs(p.slot - (valid[0]?.slot || 0)) > maxSlotDivergence) {
+                maxSlotDivergence = Math.abs(p.slot - (valid[0]?.slot || 0));
+              }
+              if (p.age > maxAgeDivergenceMs) maxAgeDivergenceMs = p.age;
+            }
+          }
+          logInfo(`━━━━━━━━ FEED CONSENSUS ━━━━━━━━`);
+          logInfo(`Fresh pairs: ${freshPairs} | Stale pairs: ${stalePairs}`);
+          logInfo(`Max slot divergence: ${maxSlotDivergence} | Max age: ${(maxAgeDivergenceMs/1000).toFixed(1)}s`);
+          logInfo(`Healthy pools: ${cacheStats.pools} | Disabled: ${cacheStats.disabled} | Blacklisted: ${cacheStats.blacklisted}`);
+          logInfo(`Graph edges: ${edgeMetrics.totalEdges} | Duplicates rejected: ${edgeMetrics.duplicateRejectedEdges}`);
+          logInfo(`Cross-dex opportunities: ${spreadEngine.getMultiHopCandidates().filter(m => m.netBps > 0).length} | Executable: ${executableDetector['opportunities']?.filter((o: any) => o.netSpreadBps > 0).length || 0}`);
+          logInfo(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
         }
 
         analytics.resetWindow();

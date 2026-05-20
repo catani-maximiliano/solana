@@ -177,6 +177,7 @@ export class RaydiumClmmProvider implements DexPoolReader {
       if (parsed) {
         this.emitPoolUpdate(parsed, 0, feeBps);
         marketState.recordMintOrder(poolAddress, parsed.mintA, parsed.mintB);
+        marketState.recordValidUpdate(poolAddress);
         logInfo(`Raydium CLMM: pool ${poolAddress.substring(0, 8)}... cargado ✅ (tick: ${parsed.tickCurrent}, price: ${sqrtPriceX64ToPrice(parsed.sqrtPriceX64, parsed.decimalsA, parsed.decimalsB).toFixed(6)})`);
 
         // Only subscribe to WS updates if initial parse succeeded (account IS a pool state)
@@ -200,6 +201,7 @@ export class RaydiumClmmProvider implements DexPoolReader {
         }
       } else {
         logWarning(`Raydium CLMM: pool ${poolAddress.substring(0, 8)}... parseo falló (${acc.data.length} bytes) — NO es CLMM pool state`);
+        marketState.recordInvalidUpdate(poolAddress);
         this.parseFailures++;
       }
 
