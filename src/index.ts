@@ -365,7 +365,7 @@ async function initialize(): Promise<boolean> {
     enableTriangular: config.scanEnableTriangular,
     quoteSizeLamports: Math.floor(config.scanQuoteSizeSol * 1_000_000_000),
   });
-  tokenDiscovery.start();
+  // tokenDiscovery.start(); // DISABLED — curated registry only
 
   console.log("\n═══════════════════════════════════════════════");
   console.log("  STARTUP VERIFICATION");
@@ -609,7 +609,7 @@ async function mainLoop(): Promise<void> {
           }
           const mhCandidates = spreadEngine.getMultiHopCandidates().filter(m => m.netBps > 0).length;
           const execOpps = (executableDetector as any).opportunities?.filter((o: any) => o.netSpreadBps > 0).length || 0;
-          logInfo(`━━━━━━━━ LATENCY HEALTH ━━━━━━━━`);
+          logInfo(`━━━━━━━━ FEED HEALTH ━━━━━━━━`);
           logInfo(`Healthy pools: ${cacheStats.pools} | Disabled: ${cacheStats.disabled} | Blacklisted: ${cacheStats.blacklisted}`);
           logInfo(`Fresh pairs: ${freshPairs} | Stale pairs: ${stalePairs}`);
           logInfo(`Max slot Δ: ${maxSlotDivergence} | Max age Δ: ${(maxAgeDivergenceMs/1000).toFixed(1)}s`);
