@@ -642,6 +642,14 @@ export class PriceGraph {
     this.ensureNode(mintA, symA);
     this.ensureNode(mintB, symB);
 
+    // When using NLN streams, don't create INVALID edges — wait for first real event.
+    // This prevents price=0, health=INVALID contamination in the graph.
+    const useNln = process.env.USE_NLN_STREAMS === "true";
+    if (useNln) {
+      logDebug(`Graph: registered nodes for ${symA}/${symB} (${dex}) — waiting for NLN event to create edge`);
+      return;
+    }
+
     const edgeAB: PriceEdge = {
       from: mintA, to: mintB, dex, poolAddress,
       price: 0, inversePrice: 0, liquidity: 0, fee: 0, weight: 0,

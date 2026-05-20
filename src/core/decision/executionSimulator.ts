@@ -24,7 +24,7 @@ export function simulateExecution(
 ): SimulationResult {
   // Simulate slippage at execution time
   const slippage = estimateSlippage(100, liquidity, velocity, toxicity);
-  const simSlippageBps = slippage.expected + (latencyMs / 1000) * 2; // extra slippage from latency
+  const simSlippageBps = slippage.expected + (latencyMs / 1000) * 0.5; // reduced extra slippage from latency
 
   // Simulate fill
   const fill = simulateFill(latencyMs, liquidity, grossBps, persistenceScore);

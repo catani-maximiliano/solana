@@ -195,10 +195,13 @@ export class SpreadEngine {
     const bestBid = allPools[allPools.length - 1];
     const spreadBps = bestAsk.price > 0 ? ((bestBid.price - bestAsk.price) / bestAsk.price) * 10000 : 0;
 
-    // ── STRICT freshness consensus check ──
+    // ── Relaxed freshness check (NLN-compatible) ──
     const slotDelta = Math.abs(bestAsk.slot - bestBid.slot);
     const ageDeltaMs = Math.abs(bestAsk.age - bestBid.age);
-    if (slotDelta > 5 || ageDeltaMs > 1500) {
+    const isNln = process.env.USE_NLN_STREAMS === "true";
+    const maxSlotDelta = isNln ? 50 : 5;
+    const maxAgeDelta = isNln ? 10_000 : 1500;
+    if (slotDelta > maxSlotDelta || ageDeltaMs > maxAgeDelta) {
       logDebug(`STALE_REJECT: ${pair} slotΔ=${slotDelta} ageΔ=${ageDeltaMs}ms — ${bestAsk.dex} age=${(bestAsk.age/1000).toFixed(1)}s slot=${bestAsk.slot} vs ${bestBid.dex} age=${(bestBid.age/1000).toFixed(1)}s slot=${bestBid.slot}`);
       const info: PairSurfaceInfo = { pair, pools: allPools, bestAsk: bestAsk.price, bestBid: bestBid.price, spreadBps: 0, simulations: [] };
       this.surfaces.set(pair, info);

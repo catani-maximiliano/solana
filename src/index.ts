@@ -344,6 +344,11 @@ async function initialize(): Promise<boolean> {
   const useNln = process.env.USE_NLN_STREAMS === "true";
 
   if (useNln) {
+    logInfo("[NLN-ONLY] legacy WS disabled");
+    logInfo("[NLN-ONLY] accountSubscribe disabled");
+    logInfo("[NLN-ONLY] polling disabled");
+    logInfo("[NLN-ONLY] periodic scans disabled");
+    logInfo("[NLN-ONLY] stale RPC refreshes disabled");
     logInfo("MODE: FULL EVENT-DRIVEN NLN");
     logInfo("RPC: bootstrap only | WS: disabled | Polling: disabled");
 
