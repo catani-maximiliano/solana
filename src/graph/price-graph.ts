@@ -695,14 +695,40 @@ export class PriceGraph {
 
   addEdge(edge: PriceEdge): void {
     const key = `${edge.from}:${edge.to}`;
+    // Composite dedup key: dex + pool + direction (prevents same pool from being inserted twice)
+    const dedupKey = `${edge.dex}:${edge.poolAddress}:${edge.from}:${edge.to}`;
     const existing = this.edges.get(key) || [];
-    const idx = existing.findIndex((e) => e.poolAddress === edge.poolAddress);
-    if (idx >= 0) existing[idx] = edge;
-    else existing.push(edge);
+    const idx = existing.findIndex((e) => {
+      const ek = `${e.dex}:${e.poolAddress}:${e.from}:${e.to}`;
+      return ek === dedupKey;
+    });
+    if (idx >= 0) {
+      existing[idx] = edge;
+      this.duplicateRejectedEdges++;
+    } else {
+      existing.push(edge);
+      this.insertedEdges++;
+    }
     this.edges.set(key, existing);
     const symFrom = this.mintToSymbol(edge.from);
     const symTo = this.mintToSymbol(edge.to);
-    logDebug(`Graph edge: ${symFrom}â†’${symTo} (${edge.dex}) ${idx >= 0 ? "updated" : "inserted"} price=${edge.price} health=${edge.health} (${existing.length} edges for pair)`);
+    if (idx >= 0) {
+      logDebug(`Graph edge: ${symFrom}→${symTo} (${edge.dex}) updated price=${edge.price} health=${edge.health}`);
+    } else {
+      logDebug(`Graph edge: ${symFrom}→${symTo} (${edge.dex}) inserted price=${edge.price} health=${edge.health}`);
+    }
+  }
+
+  private insertedEdges = 0;
+  private duplicateRejectedEdges = 0;
+
+  getEdgeMetrics() {
+    return {
+      insertedEdges: this.insertedEdges,
+      duplicateRejectedEdges: this.duplicateRejectedEdges,
+      totalEdges: this.getEdgeCount(),
+      validEdges: this.getValidEdgeCount(),
+    };
   }
 
   getAllEdgesForKey(from: string, to: string): PriceEdge[] {

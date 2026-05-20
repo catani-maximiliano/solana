@@ -123,14 +123,21 @@ export class SpreadEngine {
   start(): void {
     if (this.started) return;
     this.started = true;
+
+    // Event storm control: batch pool updates into a single scan per window
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     eventBus.subscribe("pool:update", () => {
-      if (priceGraph.getPairSurfaceLabels().length === 0) return;
-      if (Date.now() - this.lastScanTime < SCAN_COOLDOWN_MS) return;
-      const opps = this.scanAll();
-      this.accumulateProfit(opps);
-      this.logScannerOutput(opps);
+      if (debounceTimer) return; // already queued
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        if (priceGraph.getPairSurfaceLabels().length === 0) return;
+        if (Date.now() - this.lastScanTime < SCAN_COOLDOWN_MS) return;
+        const opps = this.scanAll();
+        this.accumulateProfit(opps);
+        this.logScannerOutput(opps);
+      }, 100); // 100ms debounce window
     });
-    logInfo("SpreadEngine: event-driven — escuchando pool:update + scanning cross-DEX spreads");
+    logInfo("SpreadEngine: event-driven + debounced — escuchando pool:update + scanning cross-DEX spreads");
   }
 
   scanAll(): ArbitrageSimulation[] {

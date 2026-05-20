@@ -115,10 +115,9 @@ async function subscribePools(): Promise<number> {
 
   let subscribed = 0;
   let providerSubscribed = 0;
+  const activeWsSubscriptions = new Set<string>(); // track pools already subscribed by providers
 
   for (const provider of config.directPoolProviders) {
-    if (!("trackPool" in provider)) continue;
-
     const poolAddrs = POOL_REGISTRY.filter((p) => p.dex === provider.dexName);
     logDebug(`  ${provider.dexName}: ${poolAddrs.length} pools para subscribir`);
 
@@ -132,6 +131,7 @@ async function subscribePools(): Promise<number> {
         logInfo(`  Subscribiendo pool ${pool.address.substring(0, 12)}... via ${provider.dexName}`);
         await (provider as any).trackPool(pool.address, pool.feeBps);
         providerSubscribed++;
+        activeWsSubscriptions.add(pool.address); // mark as subscribed by provider
       } catch (err) {
         logWarning(`  trackPool falló para ${pool.address.substring(0, 12)}... — ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -148,6 +148,11 @@ async function subscribePools(): Promise<number> {
         continue;
       }
       const isWhirlpool = entry.dex === "Whirlpool";
+      // Skip if already subscribed via provider trackPool (prevents double subscription)
+      if (activeWsSubscriptions.has(entry.address)) {
+        logDebug(`  Saltando WS duplicada para ${entry.address.substring(0, 12)}... (ya subscripto via ${entry.dex} provider)`);
+        continue;
+      }
       // Only subscribe directly for Whirlpool pools — other DEXes manage their own WS via trackPool
       if (!isWhirlpool) {
         logDebug(`  Saltando WS directa para ${entry.dex} pool ${entry.address.substring(0, 12)}... (gestionada por provider)`);

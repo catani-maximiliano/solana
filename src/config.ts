@@ -89,6 +89,7 @@ function loadConfig(): BotConfig {
   const scanProfitMultiplier = requireNumber("SCAN_PROFIT_MULTIPLIER", 2);
   const scanQuoteSizeSol = requireNumber("SCAN_QUOTE_SIZE_SOL", 0.05);
   const scanMinGrossSpreadBps = requireNumber("SCAN_MIN_GROSS_SPREAD_BPS", 0);
+  const enableMeteora = requireBool("ENABLE_METEORA", true);
 
   const dryRun = process.env.DRY_RUN !== "false";
   const debugMode = requireBool("DEBUG_MODE", false);
@@ -108,6 +109,9 @@ function loadConfig(): BotConfig {
   const raydium = new RaydiumClmmProvider(connection);
   const meteora = new MeteoraDlmmProvider(connection);
 
+  const poolProviders: DexPoolReader[] = [whirlpool, raydium];
+  if (enableMeteora) poolProviders.push(meteora);
+
   const config: BotConfig = {
     minProfitUsd, maxTradeSol, slippageBps, checkIntervalMs,
     dryRun, debugMode, quoteSizesSol, rpcUrl,
@@ -115,7 +119,7 @@ function loadConfig(): BotConfig {
     scanMaxPairs, scanMinLiquidityUsd, scanProfitMultiplier, scanEnableTriangular, scanQuoteSizeSol, scanMinGrossSpreadBps,
     connection, keypair, walletPublicKey,
     marketProviders: [jupiterProvider],
-    directPoolProviders: [whirlpool, raydium, meteora],
+    directPoolProviders: poolProviders,
   };
 
   console.log("Configuración cargada:");

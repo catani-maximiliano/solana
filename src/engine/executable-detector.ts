@@ -37,6 +37,26 @@ export class ExecutableDetector {
   private rejectedMultiHopCount = 0;
   private multiHopRejectReasons: string[] = [];
   private routeFirstSeen = new Map<string, number>(); // route → first detection timestamp
+  private opportunityFingerprints = new Map<string, number>(); // fingerprint → timestamp (TTL cache)
+  private duplicateOpportunitiesSuppressed = 0;
+
+  /** Check if an opportunity fingerprint was recently emitted */
+  private isDuplicateOpportunity(fingerprint: string, ttlMs = 5_000): boolean {
+    const last = this.opportunityFingerprints.get(fingerprint);
+    const now = Date.now();
+    if (last && now - last < ttlMs) {
+      this.duplicateOpportunitiesSuppressed++;
+      return true;
+    }
+    this.opportunityFingerprints.set(fingerprint, now);
+    // Clean stale entries
+    if (this.opportunityFingerprints.size > 100) {
+      for (const [k, v] of this.opportunityFingerprints) {
+        if (now - v > 10_000) this.opportunityFingerprints.delete(k);
+      }
+    }
+    return false;
+  }
 
   /** Days since route was first seen (persistence) */
   private getRouteAge(route: string, now: number): number {
@@ -339,6 +359,13 @@ export class ExecutableDetector {
         detectedAt: Date.now(),
         executionPlan,
       };
+
+      // Fingerprint dedup: same route + similar netBps + same DEXes within 5s window
+      const oppFp = `${mh.symbols}|${Math.round(adjustedNet)}|${firstStep?.dex || ""}|${lastStep?.dex || ""}`;
+      if (this.isDuplicateOpportunity(oppFp)) {
+        logDebug(`Executable: SKIP duplicate opportunity ${mh.symbols} net=${adjustedNet.toFixed(1)}bps`);
+        continue;
+      }
 
       logInfo(`Executable: ✅ PROMOTED multi-hop ${mh.symbols} net=+${adjustedNet.toFixed(2)}bps (raw=+${mh.netBps.toFixed(2)}bps latency-decay=${decayBps.toFixed(1)}bps) profit=$${(mh.profitUsd * (1 - decayBps / 100)).toFixed(4)} conf=${(conf * 100).toFixed(0)}% age=${(age/1000).toFixed(1)}s`);
       // Register for paper execution replay
