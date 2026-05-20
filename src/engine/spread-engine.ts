@@ -498,6 +498,29 @@ export class SpreadEngine {
 
     const profitUsd = outputUsd - INPUT_USD;
 
+    // ── Triangular cycle product validation ──
+    // In an efficient market, price(A→B) * price(B→C) * price(C→A) ≈ 1.0
+    // Any deviation from 1.0 means the "profit" is from graph math inconsistency, not real arb
+    const cycleDeviationBps = Math.abs(grossBps);
+    const allSameDex = path.edge.every((e, i, arr) => e.dex === arr[0].dex);
+    const SAME_DEX_MAX_BPS = 8;
+    const CROSS_DEX_MAX_BPS = 50;
+
+    if (allSameDex && cycleDeviationBps > SAME_DEX_MAX_BPS) {
+      logDebug(`TRI_LOOP REJECTED: ${symbols} same-dex(${path.edge[0].dex}) cycle=${cycleDeviationBps.toFixed(2)}bps > ${SAME_DEX_MAX_BPS}bps — likely graph math error, not arb`);
+      return null;
+    }
+
+    if (cycleDeviationBps > CROSS_DEX_MAX_BPS) {
+      logDebug(`TRI_LOOP REJECTED: ${symbols} cycle=${cycleDeviationBps.toFixed(2)}bps > ${CROSS_DEX_MAX_BPS}bps — exceeds no-arbitrage bound`);
+      return null;
+    }
+
+    // Diagnostic logging for profitable routes
+    if (cycleDeviationBps > 2) {
+      logInfo(`TRI_LOOP: ${symbols} cycle=${(1 + grossBps / 10000).toFixed(6)} deviation=${cycleDeviationBps.toFixed(2)}bps net=${netBps.toFixed(2)}bps fees=${feeImpactBps.toFixed(1)}bps ${allSameDex ? `[same-dex:${path.edge[0].dex}]` : "[cross-dex]"}`);
+    }
+
     return {
       route: path.path.join(":"),
       symbols,

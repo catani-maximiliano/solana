@@ -397,13 +397,14 @@ export class PriceGraph {
       const triCheck = this.checkTriangularConsistency(edge, symFrom, symTo);
       if (triCheck !== null) {
         if (triCheck.consistent) {
-          logDebug(`TRIANGULAR CHECK: ${symFrom}/${symTo}=${edge.price.toFixed(4)} = ${triCheck.viaPrice.toFixed(4)} × ${(triCheck.derived / triCheck.viaPrice).toFixed(4)} = ${triCheck.derived.toFixed(4)} (via ${triCheck.via}) dev=${(triCheck.deviation * 100).toFixed(1)}% ✅`);
+          logDebug(`TRIANGULAR CHECK: ${symFrom}/${symTo}=${edge.price.toFixed(4)} = ${triCheck.viaPrice.toFixed(4)} × ${(triCheck.derived / triCheck.viaPrice).toFixed(4)} = ${triCheck.derived.toFixed(4)} (via ${triCheck.via}) dev=${(triCheck.deviation * 100).toFixed(3)}% ${triCheck.sameDex ? "[same-dex]" : "[cross-dex]"} ✅`);
         } else {
           logWarning(`Graph: 🔴 TRIANGULAR INCONSISTENCY — ${symFrom}/${symTo} (${edge.dex} ${edge.poolAddress.substring(0, 8)}...)`);
           logWarning(`  EXPECTED: ${symFrom}/${symTo} ≈ ${triCheck.derived.toFixed(4)} (via ${symFrom}/${triCheck.via}=${triCheck.viaPrice.toFixed(4)} × ${triCheck.via}/${symTo}=${(triCheck.derived / triCheck.viaPrice).toFixed(4)})`);
           logWarning(`  ACTUAL:   ${symFrom}/${symTo} = ${edge.price.toFixed(4)}`);
-          logWarning(`  ERROR:    ${(triCheck.deviation * 100).toFixed(1)}%  (×${(edge.price / triCheck.derived).toFixed(1)}x deviation)`);
-          if (triCheck.deviation > 0.20) { // >20% = likely corruption
+          logWarning(`  ERROR:    ${(triCheck.deviation * 100).toFixed(3)}%  ${triCheck.sameDex ? "[same-dex] REJECT" : "[cross-dex]"}`);
+          const invalidThreshold = triCheck.sameDex ? 0.0005 : 0.05;
+          if (triCheck.deviation > invalidThreshold) {
             return "INVALID_PRICE";
           }
         }
@@ -418,7 +419,7 @@ export class PriceGraph {
     edge: PriceEdge,
     symFrom: string,
     symTo: string,
-  ): { consistent: boolean; via: string; viaPrice: number; derived: number; deviation: number } | null {
+  ): { consistent: boolean; via: string; viaPrice: number; derived: number; deviation: number; sameDex: boolean } | null {
     if (!edge.price || edge.price <= 0) return null;
 
     // Try to find an intermediate token that connects from→to
@@ -440,15 +441,20 @@ export class PriceGraph {
       const derived = viaEdge.price * toEdge.price;
       if (derived <= 0) continue;
 
+      const sameDex = viaEdge.dex === edge.dex && toEdge.dex === edge.dex;
       const deviation = Math.abs(edge.price - derived) / Math.max(edge.price, derived);
       const viaSym = this.mintToSymbol(n.token);
 
+      // Threshold: 0.03% for same DEX, 3% for cross DEX
+      const threshold = sameDex ? 0.0003 : 0.03;
+
       return {
-        consistent: deviation < 0.10, // <10% deviation = consistent
+        consistent: deviation < threshold,
         via: viaSym,
         viaPrice: edge.price,
         derived,
         deviation,
+        sameDex,
       };
     }
 

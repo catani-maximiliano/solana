@@ -1,12 +1,20 @@
 import { priceGraph } from "../graph";
 import { profitLedger } from "./profit-ledger";
-import { logInfo, logSuccess, logDebug } from "../logger";
+import { logInfo, logSuccess, logWarning, logDebug } from "../logger";
 import * as fs from "fs";
 import * as path from "path";
 
+const MAX_ROUTE_LIFETIME_MS = 3_000;
+const FINGERPRINT_EXPIRY_MS = 1_000;
+
+interface StepSnapshot {
+  from: string;
+  to: string;
+}
+
 interface PendingExecution {
   route: string;
-  steps: Array<{ from: string; to: string }>;
+  steps: StepSnapshot[];
   detectedAt: number;
   promotedAt: number;
   expectedNetBps: number;
@@ -14,6 +22,8 @@ interface PendingExecution {
   inputUsd: number;
   firstEdgeMint: string;
   lastEdgeMint: string;
+  lastFingerprint: string;
+  fingerprintAge: number;
 }
 
 interface ExecutionReplay {
@@ -30,6 +40,18 @@ interface RouteStats {
   survived1s: number;
   survived2s: number;
   survived5s: number;
+}
+
+/** Build a fingerprint from current market state for a route's hops */
+function buildRouteFingerprint(steps: StepSnapshot[]): string {
+  const parts: string[] = [];
+  for (const s of steps) {
+    const edge = priceGraph.getDirectPrice(s.from, s.to);
+    if (edge && edge.price > 0) {
+      parts.push(`${edge.price.toFixed(6)}:${edge.slot}:${edge.liquidity}`);
+    }
+  }
+  return parts.join("|");
 }
 
 export class PaperExecutionEngine {
@@ -58,6 +80,27 @@ export class PaperExecutionEngine {
     lastEdgeMint: string,
   ): void {
     const now = Date.now();
+
+    // Build fingerprint to detect frozen routes
+    const fp = buildRouteFingerprint(steps);
+
+    // Check if same route already registered with identical fingerprint
+    const existingIdx = this.pending.findIndex(e => e.route === route);
+    if (existingIdx >= 0) {
+      const existing = this.pending[existingIdx];
+      if (existing.lastFingerprint === fp) {
+        const fpAge = now - existing.promotedAt;
+        if (fpAge > FINGERPRINT_EXPIRY_MS) {
+          logWarning(`PaperExec: ⚠ FROZEN ROUTE DETECTED: ${route} — fingerprint unchanged for ${(fpAge/1000).toFixed(1)}s — replacing`);
+        }
+      }
+      // Remove old registration, replace with fresh one
+      this.pending.splice(existingIdx, 1);
+    }
+
+    // Max lifetime enforcement: purge stale registrations
+    this.pending = this.pending.filter(e => (now - e.promotedAt) < MAX_ROUTE_LIFETIME_MS);
+
     this.pending.push({
       route,
       steps,
@@ -68,6 +111,8 @@ export class PaperExecutionEngine {
       inputUsd,
       firstEdgeMint,
       lastEdgeMint,
+      lastFingerprint: fp,
+      fingerprintAge: 0,
     });
 
     // Update route stats

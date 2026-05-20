@@ -1,2 +1,1 @@
 datetime_utc,time_utc,timestamp_ms,scan_id,route,type,input_usd,output_usd,gross_bps,fees_bps,slippage_bps,net_bps,net_usd,status,confidence,buy_dex,sell_dex,latency_ms
-

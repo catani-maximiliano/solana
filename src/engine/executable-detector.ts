@@ -23,6 +23,8 @@ const SOL_PRICE_USD = 160;
 const PERSISTENCE_WINDOW_MS = 1_500; // route must survive 1.5s before executable
 const SIMULATED_LATENCY_MS = 2_000; // simulated execution delay
 const SLIPPAGE_DECAY_PER_SEC = 0.3; // 30% of slippage added per second of latency
+const WARMUP_MS = 45_000; // no executable promotion during first 45s (bootstrap stability)
+const STARTUP_TIME = Date.now();
 
 export class ExecutableDetector {
   private opportunities: ExecutableOpportunity[] = [];
@@ -63,6 +65,12 @@ export class ExecutableDetector {
     if (now - this.lastDetectionTime < DETECTION_COOLDOWN_MS) return [];
     this.lastDetectionTime = now;
     this.totalScans++;
+
+    // Warmup phase: no executable promotion during bootstrap
+    if (now - STARTUP_TIME < WARMUP_MS) {
+      logDebug(`Executable: warmup ${(now - STARTUP_TIME) / 1000}s/${WARMUP_MS / 1000}s — skipping promotion`);
+      return [];
+    }
 
     // Clear previous detection keys so fresh opportunities aren't blocked
     this.detectedKeys.clear();

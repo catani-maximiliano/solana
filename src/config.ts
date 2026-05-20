@@ -6,7 +6,6 @@ import { MarketDataProvider, jupiterProvider, WhirlpoolProvider, RaydiumClmmProv
 dotenv.config();
 
 export interface BotConfig {
-  privateKey: string;
   rpcUrl: string;
   minProfitUsd: number;
   maxTradeSol: number;
@@ -62,19 +61,20 @@ function parseSizes(name: string, defaultSizes: number[]): number[] {
   });
 }
 
-function loadKeypair(privateKeyBase58: string): Keypair {
+function loadKeypair(privateKeyBase58: string | undefined): Keypair | undefined {
+  if (!privateKeyBase58) return undefined;
   try {
     const decoded = bs58.decode(privateKeyBase58);
     return Keypair.fromSecretKey(decoded);
   } catch {
-    throw new Error("PRIVATE_KEY inválida. Debe ser base58.");
+    return undefined;
   }
 }
 
 function loadConfig(): BotConfig {
   console.log("Cargando configuración...");
 
-  const privateKey = requireEnv("PRIVATE_KEY");
+  const privateKey = process.env.PRIVATE_KEY || "";
   const rpcUrl = requireEnv("RPC_URL");
 
   const minProfitUsd = requireNumber("MIN_PROFIT_USD", 0.05);
@@ -95,7 +95,7 @@ function loadConfig(): BotConfig {
   const scanEnableTriangular = requireBool("SCAN_ENABLE_TRIANGULAR", true);
   const quoteSizesSol = parseSizes("QUOTE_SIZES", [0.05, 0.1]);
 
-  const keypair = loadKeypair(privateKey);
+  const keypair = loadKeypair(privateKey) || Keypair.generate();
   const walletPublicKey = keypair.publicKey.toBase58();
 
   const connection = new Connection(rpcUrl, {
@@ -109,9 +109,8 @@ function loadConfig(): BotConfig {
   const meteora = new MeteoraDlmmProvider(connection);
 
   const config: BotConfig = {
-    privateKey, rpcUrl,
     minProfitUsd, maxTradeSol, slippageBps, checkIntervalMs,
-    dryRun, debugMode, quoteSizesSol,
+    dryRun, debugMode, quoteSizesSol, rpcUrl,
     maxQuoteAgeMs, maxRequestsPerMin, persistenceRequired,
     scanMaxPairs, scanMinLiquidityUsd, scanProfitMultiplier, scanEnableTriangular, scanQuoteSizeSol, scanMinGrossSpreadBps,
     connection, keypair, walletPublicKey,
