@@ -1,4 +1,4 @@
-import { NormalizedSwapEvent } from "../../streams/nolimitnode/types";
+import { NormalizedRealtimeEvent } from "../../streams/registry/eventTypes";
 import { priceGraph } from "../../graph";
 import { EventCandidate } from "./types";
 import { logInfo, logDebug } from "../../logger";
@@ -12,7 +12,7 @@ export class OpportunityEngine {
   private totalCandidatesGenerated = 0;
 
   /** Detect opportunities triggered by a swap event */
-  detect(event: NormalizedSwapEvent): EventCandidate[] {
+  detect(event: NormalizedRealtimeEvent): EventCandidate[] {
     const found: EventCandidate[] = [];
 
     // Get affected pair from the swap pool
@@ -57,7 +57,7 @@ export class OpportunityEngine {
         expectedProfitUsd: profitUsd,
         sourceSlot: event.slot,
         detectedAt: Date.now(),
-        triggerEvent: event.streamTopic,
+        triggerEvent: event.topic,
       };
 
       // Dedup: same route within 500ms

@@ -1,4 +1,4 @@
-import { NormalizedSwapEvent } from "../../streams/nolimitnode/types";
+import { NormalizedRealtimeEvent } from "../../streams/registry/eventTypes";
 import { priceGraph } from "../../graph";
 import { updateEdgeFromSwap } from "./edgeUpdater";
 import { logInfo, logDebug } from "../../logger";
@@ -16,7 +16,7 @@ export class EventGraphEngine {
   private knownPools = new Set<string>();
 
   /** Process a swap event: update the graph for the affected pool */
-  processSwap(event: NormalizedSwapEvent): void {
+  processSwap(event: NormalizedRealtimeEvent): void {
     const start = performance.now();
 
     // Track pool

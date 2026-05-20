@@ -18,6 +18,7 @@ import { surfaceEngine, executableDetector, spreadEngine, printNetworkReport, po
 import { profitLedger } from "./engine/profit-ledger";
 import { paperExecution } from "./engine/paper-execution";
 import { graphAudit } from "./graph/graph-audit";
+import { startEventDrivenEngine } from "./core/event-driven/EventDrivenEngine";
 import { eventScheduler } from "./scheduler";
 import { marketValidator } from "./market-validator";
 import { POOL_REGISTRY, POOL_BLACKLIST, getPoolSummary } from "./config/pools";
@@ -339,6 +340,33 @@ async function initialize(): Promise<boolean> {
   analytics.reset();
 
   const rpcOk = await checkRpcConnectivity();
+
+  const useNln = process.env.USE_NLN_STREAMS === "true";
+
+  if (useNln) {
+    logInfo("MODE: FULL EVENT-DRIVEN NLN");
+    logInfo("RPC: bootstrap only | WS: disabled | Polling: disabled");
+
+    // Bootstrap snapshot ONCE via RPC
+    for (const entry of POOL_REGISTRY) {
+      marketState.registerPoolFromRegistry(entry.address, entry.mintA, entry.mintB, entry.dex, entry.decimalsA, entry.decimalsB);
+      priceGraph.seedFromRegistry(entry.address, entry.mintA, entry.mintB, entry.dex);
+    }
+
+    // Sync initial state from market cache
+    for (const p of marketState.getAllPools()) {
+      priceGraph.updateFromPool(p);
+    }
+
+    logInfo(`Graph bootstrapped: ${priceGraph.getNodeCount()} nodes, ${priceGraph.getEdgeCount()} edges`);
+
+    // Start NLN event-driven engine
+    startEventDrivenEngine();
+
+    logSuccess("[EVENT] Event-driven pipeline active — waiting for NLN streams...");
+    return true;
+  }
+
   const wsOk = await verifyWebSocket();
 
   await attachWsToProviders();

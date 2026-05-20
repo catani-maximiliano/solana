@@ -1,4 +1,4 @@
-import { NormalizedSwapEvent } from "../../streams/nolimitnode/types";
+import { NormalizedRealtimeEvent } from "../../streams/registry/eventTypes";
 import { priceGraph } from "../../graph";
 import { marketState } from "../../market/state-cache";
 import { sqrtPriceX64ToPrice } from "../../math";
@@ -10,7 +10,7 @@ const EDGE_STALE_MS = 10_000;
  * Update the graph for a single pool based on a swap event.
  * This replaces the old RPC-based pool snapshot update pattern.
  */
-export function updateEdgeFromSwap(event: NormalizedSwapEvent): boolean {
+export function updateEdgeFromSwap(event: NormalizedRealtimeEvent): boolean {
   if (!event.pool || !event.tokenIn || !event.tokenOut) return false;
 
   // Compute forward price (tokenOut per tokenIn)
@@ -25,7 +25,7 @@ export function updateEdgeFromSwap(event: NormalizedSwapEvent): boolean {
     mintB: event.tokenOut,
     decimalsA: 9,
     decimalsB: 6,
-    sqrtPriceX64: event.priceBefore > 0 ? "0" : "0",
+    sqrtPriceX64: event.price > 0 ? event.price.toString() : "0",
     liquidity: event.liquidity || "0",
     tick: event.tick,
     fee: 0,
