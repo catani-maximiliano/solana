@@ -2,6 +2,7 @@ import { Connection, Keypair } from "@solana/web3.js";
 import dotenv from "dotenv";
 import bs58 from "bs58";
 import { MarketDataProvider, jupiterProvider, WhirlpoolProvider, RaydiumClmmProvider, MeteoraDlmmProvider, DexPoolReader } from "./market";
+import { getRpcConnection } from "./network/RpcClient";
 
 dotenv.config();
 
@@ -75,7 +76,7 @@ function loadConfig(): BotConfig {
   console.log("Cargando configuración...");
 
   const privateKey = process.env.PRIVATE_KEY || "";
-  const rpcUrl = requireEnv("RPC_URL");
+  const rpcUrl = process.env.SOLANA_RPC_URL || process.env.RPC_URL || requireEnv("RPC_URL");
 
   const minProfitUsd = requireNumber("MIN_PROFIT_USD", 0.05);
   const maxTradeSol = requireNumber("MAX_TRADE_SOL", 0.1);
@@ -99,11 +100,7 @@ function loadConfig(): BotConfig {
   const keypair = loadKeypair(privateKey) || Keypair.generate();
   const walletPublicKey = keypair.publicKey.toBase58();
 
-  const connection = new Connection(rpcUrl, {
-    commitment: "confirmed",
-    confirmTransactionInitialTimeout: 60000,
-    wsEndpoint: rpcUrl.replace("https://", "wss://").replace("http://", "ws://"),
-  });
+  const connection = getRpcConnection();
 
   const whirlpool = new WhirlpoolProvider(connection);
   const raydium = new RaydiumClmmProvider(connection);

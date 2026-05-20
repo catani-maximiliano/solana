@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package nln.stream.v1;
+
+service StreamService {
+  rpc Subscribe(SubscriptionRequest) returns (stream SubscriptionResponse);
+}
+
+message SubscriptionRequest {
+  string topic = 1;
+  int32 format = 2;
+}
+
+message SubscriptionResponse {
+  uint64 slot = 1;
+  string payload = 2;
+}

@@ -17,6 +17,7 @@ import { priceGraph } from "./graph";
 import { surfaceEngine, executableDetector, spreadEngine, printNetworkReport, poolHealthMonitor } from "./engine";
 import { profitLedger } from "./engine/profit-ledger";
 import { paperExecution } from "./engine/paper-execution";
+import { graphAudit } from "./graph/graph-audit";
 import { eventScheduler } from "./scheduler";
 import { marketValidator } from "./market-validator";
 import { POOL_REGISTRY, POOL_BLACKLIST, getPoolSummary } from "./config/pools";
@@ -589,33 +590,13 @@ async function mainLoop(): Promise<void> {
           const autoDisabled = marketState.autoDisableStalePools(300_000);
           if (autoDisabled > 0) logInfo(`PoolHealth: ${autoDisabled} pools auto-disabled (stale >300s)`);
 
-          // ── Latency health dashboard ──
-          const cacheStats = marketState.getStats();
-          const edgeMetrics = priceGraph.getEdgeMetrics();
-          const labels = priceGraph.getPairSurfaceLabels();
-          let freshPairs = 0, stalePairs = 0, maxSlotDivergence = 0, maxAgeDivergenceMs = 0;
-          for (const label of labels) {
-            const surface = priceGraph.getMarketSurface(label);
-            if (!surface || surface.pools.length < 2) continue;
-            const valid = surface.pools.filter(p => p.health === "VALID" && p.price > 0);
-            const fresh = valid.filter(p => p.age < 5000);
-            if (fresh.length >= 2) freshPairs++; else stalePairs++;
-            for (const p of valid) {
-              if (p.slot > 0 && Math.abs(p.slot - (valid[0]?.slot || 0)) > maxSlotDivergence) {
-                maxSlotDivergence = Math.abs(p.slot - (valid[0]?.slot || 0));
-              }
-              if (p.age > maxAgeDivergenceMs) maxAgeDivergenceMs = p.age;
-            }
-          }
-          const mhCandidates = spreadEngine.getMultiHopCandidates().filter(m => m.netBps > 0).length;
-          const execOpps = (executableDetector as any).opportunities?.filter((o: any) => o.netSpreadBps > 0).length || 0;
-          logInfo(`━━━━━━━━ FEED HEALTH ━━━━━━━━`);
-          logInfo(`Healthy pools: ${cacheStats.pools} | Disabled: ${cacheStats.disabled} | Blacklisted: ${cacheStats.blacklisted}`);
-          logInfo(`Fresh pairs: ${freshPairs} | Stale pairs: ${stalePairs}`);
-          logInfo(`Max slot Δ: ${maxSlotDivergence} | Max age Δ: ${(maxAgeDivergenceMs/1000).toFixed(1)}s`);
-          logInfo(`Cross-dex routes: ${mhCandidates} | Executable: ${execOpps}`);
-          logInfo(`Graph edges: ${edgeMetrics.totalEdges} | Duplicate rejects: ${edgeMetrics.duplicateRejectedEdges}`);
-          logInfo(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+          // Remove stale graph edges (age > 5s)
+          const staleRemoved = graphAudit.removeStaleEdges();
+          if (staleRemoved > 0) logDebug(`GraphAudit: ${staleRemoved} stale edges removed`);
+
+          // ── Graph time health audit ──
+          const audit = graphAudit.audit();
+          graphAudit.printReport(audit);
         }
 
         analytics.resetWindow();
