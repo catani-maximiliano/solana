@@ -19,7 +19,7 @@ import { profitLedger } from "./engine/profit-ledger";
 import { paperExecution } from "./engine/paper-execution";
 import { eventScheduler } from "./scheduler";
 import { marketValidator } from "./market-validator";
-import { POOL_REGISTRY, getPoolSummary } from "./config/pools";
+import { POOL_REGISTRY, POOL_BLACKLIST, getPoolSummary } from "./config/pools";
 import { sqrtPriceX64ToPrice } from "./math";
 import { stateConsistency } from "./state-consistency";
 import { Scanner, tokenDiscovery, quoteEngine } from "./scanner";
@@ -123,6 +123,10 @@ async function subscribePools(): Promise<number> {
 
     for (const pool of poolAddrs) {
       // Skip blacklisted pools
+      if (POOL_BLACKLIST.includes(pool.address)) {
+        logDebug(`  Saltando pool blacklisted ${pool.address.substring(0, 12)}... (${provider.dexName})`);
+        continue;
+      }
       if (marketState.isBlacklisted(pool.address)) {
         logDebug(`  Saltando pool blacklisted ${pool.address.substring(0, 12)}... (${provider.dexName})`);
         continue;
@@ -143,6 +147,10 @@ async function subscribePools(): Promise<number> {
   for (const entry of POOL_REGISTRY) {
     if (wsManager && entry.address) {
       // Skip blacklisted pools
+      if (POOL_BLACKLIST.includes(entry.address)) {
+        logDebug(`  Saltando blacklisted ${entry.address.substring(0, 12)}... (${entry.dex})`);
+        continue;
+      }
       if (marketState.isBlacklisted(entry.address)) {
         logDebug(`  Saltando blacklisted ${entry.address.substring(0, 12)}... (${entry.dex})`);
         continue;
