@@ -1,0 +1,31 @@
+# NoLimitNode Event Streams — Auto-Registry
+# Format: EVENT: <topic>
+# Description: <optional description>
+# API Key: loaded from env SOLANA_API_KEY
+
+EVENT: solana.orca_whirlpool.swap_v2
+DESC: Orca Whirlpool swap events (V2)
+
+EVENT: solana.orca_whirlpool.two_hop_swap_v2
+DESC: Orca two-hop swap events (V2)
+
+EVENT: solana.orca_whirlpool.traded_event
+DESC: Orca Whirlpool traded events
+
+EVENT: solana.jupiter.candidate_swap_results_event
+DESC: Jupiter swap results
+
+EVENT: solana.jupiter.route_event
+DESC: Jupiter route events
+
+EVENT: solana.raydium_clmm.swap_event
+DESC: Raydium CLMM swap events
+
+EVENT: solana.meteora_dlmm.swap_event
+DESC: Meteora DLMM swap events
+
+EVENT: solana.phoenix.market_event
+DESC: Phoenix market events
+
+EVENT: solana.openbook_v2.market_event
+DESC: OpenBook V2 market events

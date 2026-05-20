@@ -162,6 +162,12 @@ async function subscribePools(): Promise<number> {
         logDebug(`  Saltando WS duplicada para ${entry.address.substring(0, 12)}... (ya subscripto via ${entry.dex} provider)`);
         continue;
       }
+      // Skip Whirlpool WS subscriptions when NLN streams are active
+      const useNlnStreams = process.env.USE_NLN_STREAMS === "true";
+      if (isWhirlpool && useNlnStreams) {
+        logDebug(`  Saltando WS directa Whirlpool (usando NLN streams): ${entry.address.substring(0, 12)}...`);
+        continue;
+      }
       // Only subscribe directly for Whirlpool pools — other DEXes manage their own WS via trackPool
       if (!isWhirlpool) {
         logDebug(`  Saltando WS directa para ${entry.dex} pool ${entry.address.substring(0, 12)}... (gestionada por provider)`);
@@ -436,6 +442,15 @@ async function initialize(): Promise<boolean> {
 }
 
 async function mainLoop(): Promise<void> {
+  // If using NLN streams, skip the polling loop entirely
+  if (process.env.USE_NLN_STREAMS === "true") {
+    logInfo("[MAIN] Polling loop desactivado — usando event-driven NLN streams");
+    // Keep process alive with minimal heartbeat
+    while (true) {
+      await new Promise(r => setTimeout(r, 30_000));
+    }
+  }
+
   const metrics: SessionMetrics = {
     startTime: new Date(), checksCount: 0, opportunitiesFound: 0, totalProfitUsd: 0, errorsCount: 0,
   };

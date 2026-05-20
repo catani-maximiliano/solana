@@ -1,5 +1,2 @@
 datetime_utc,time_utc,session_start_ms,session_end_ms,total_scans,total_opportunities,profitable_count,executable_count,theoretical_pnl_usd,executable_pnl_usd,avg_net_bps,best_trade_usd,worst_trade_usd
 
-
-2026-05-20 00:15:00.971,00:15:52.215,1779236100971,1779236152215,17,0,0,0,0.0000,0.0000,0.00,0.0000,0.0000
-2026-05-20 00:20:41.233,00:21:28.867,1779236441233,1779236488867,10,0,0,0,0.0000,0.0000,0.00,0.0000,0.0000

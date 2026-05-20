@@ -19,6 +19,7 @@ import { accountMetrics } from "./account-metrics";
 
 const WHIRLPOOL_PROGRAM = OFFICIAL_PROGRAMS.whirlpool.id;
 const DEX = "Whirlpool";
+const USE_NLN_STREAMS = process.env.USE_NLN_STREAMS === "true"; // disable RPC polling when true
 
 export type WhirlpoolState = "INITIALIZED" | "CONNECTED" | "SUBSCRIBED" | "RECEIVING_DATA" | "HEALTHY" | "DEGRADED" | "FAILED" | "SHUTDOWN";
 
@@ -250,12 +251,14 @@ export class WhirlpoolProvider implements DexPoolReader {
         logWarning(`Whirlpool: datos insuficientes (${acc?.data.length || 0} bytes) — pool data puede requerir encoding especial`);
       }
 
-      if (this.wsManager) {
+      if (this.wsManager && !USE_NLN_STREAMS) {
         const subKey = `account:${poolAddress}`;
         logInfo(`Whirlpool: pasando WS subscription al gestor central`);
         this.wsSubKey = subKey;
         this.setState("SUBSCRIBED");
         logSuccess(`Whirlpool: 📡 subscription activa para ${poolAddress.substring(0, 8)}... (gestionada centralmente)`);
+      } else if (USE_NLN_STREAMS) {
+        logInfo(`Whirlpool: WS subscriptions desactivadas — usando NLN gRPC streams`);
       } else {
         logWarning(`Whirlpool: ⚠️ WS Manager no disponible para subscriptions`);
       }
