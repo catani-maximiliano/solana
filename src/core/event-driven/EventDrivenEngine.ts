@@ -60,6 +60,7 @@ export function startEventDrivenEngine(): void {
   setInterval(() => {
     const gm = eventGraphEngine.getMetrics();
     const registry = getRegistryState();
+    eventGraphEngine.printStreamHealth();
     printRegistryStatus();
     logInfo(`[EVENT] graph: ${gm.totalUpdates} updates (${gm.updatesPerSec}/s) | streams: ${registry.activeStreams}/${registry.topics.length}`);
   }, 30_000);
