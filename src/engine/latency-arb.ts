@@ -1,8 +1,8 @@
 import { priceGraph, PriceEdge } from "../graph";
 import { logInfo, logSuccess } from "../logger";
 
-const STALE_THRESHOLD_MS = 5_000;
-const FRESH_THRESHOLD_MS = 2_000;
+const STALE_THRESHOLD_MS = 3_000;
+const FRESH_THRESHOLD_MS = 1_000;
 const SLOT_DIVERGENCE_THRESHOLD = 5;
 const MIN_LIQUIDITY_USD = 1_000;
 

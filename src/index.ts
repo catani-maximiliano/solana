@@ -585,7 +585,11 @@ async function mainLoop(): Promise<void> {
           // Hybrid WS + RPC refresh: fetch stale pools directly via RPC
           await hybridRefreshStalePools();
 
-          // ── Health consensus summary ──
+          // Auto-disable pools stale >300s
+          const autoDisabled = marketState.autoDisableStalePools(300_000);
+          if (autoDisabled > 0) logInfo(`PoolHealth: ${autoDisabled} pools auto-disabled (stale >300s)`);
+
+          // ── Latency health dashboard ──
           const cacheStats = marketState.getStats();
           const edgeMetrics = priceGraph.getEdgeMetrics();
           const labels = priceGraph.getPairSurfaceLabels();
@@ -595,8 +599,7 @@ async function mainLoop(): Promise<void> {
             if (!surface || surface.pools.length < 2) continue;
             const valid = surface.pools.filter(p => p.health === "VALID" && p.price > 0);
             const fresh = valid.filter(p => p.age < 5000);
-            if (fresh.length >= 2) freshPairs++;
-            else stalePairs++;
+            if (fresh.length >= 2) freshPairs++; else stalePairs++;
             for (const p of valid) {
               if (p.slot > 0 && Math.abs(p.slot - (valid[0]?.slot || 0)) > maxSlotDivergence) {
                 maxSlotDivergence = Math.abs(p.slot - (valid[0]?.slot || 0));
@@ -604,12 +607,14 @@ async function mainLoop(): Promise<void> {
               if (p.age > maxAgeDivergenceMs) maxAgeDivergenceMs = p.age;
             }
           }
-          logInfo(`━━━━━━━━ FEED CONSENSUS ━━━━━━━━`);
-          logInfo(`Fresh pairs: ${freshPairs} | Stale pairs: ${stalePairs}`);
-          logInfo(`Max slot divergence: ${maxSlotDivergence} | Max age: ${(maxAgeDivergenceMs/1000).toFixed(1)}s`);
+          const mhCandidates = spreadEngine.getMultiHopCandidates().filter(m => m.netBps > 0).length;
+          const execOpps = (executableDetector as any).opportunities?.filter((o: any) => o.netSpreadBps > 0).length || 0;
+          logInfo(`━━━━━━━━ LATENCY HEALTH ━━━━━━━━`);
           logInfo(`Healthy pools: ${cacheStats.pools} | Disabled: ${cacheStats.disabled} | Blacklisted: ${cacheStats.blacklisted}`);
-          logInfo(`Graph edges: ${edgeMetrics.totalEdges} | Duplicates rejected: ${edgeMetrics.duplicateRejectedEdges}`);
-          logInfo(`Cross-dex opportunities: ${spreadEngine.getMultiHopCandidates().filter(m => m.netBps > 0).length} | Executable: ${executableDetector['opportunities']?.filter((o: any) => o.netSpreadBps > 0).length || 0}`);
+          logInfo(`Fresh pairs: ${freshPairs} | Stale pairs: ${stalePairs}`);
+          logInfo(`Max slot Δ: ${maxSlotDivergence} | Max age Δ: ${(maxAgeDivergenceMs/1000).toFixed(1)}s`);
+          logInfo(`Cross-dex routes: ${mhCandidates} | Executable: ${execOpps}`);
+          logInfo(`Graph edges: ${edgeMetrics.totalEdges} | Duplicate rejects: ${edgeMetrics.duplicateRejectedEdges}`);
           logInfo(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
         }
 

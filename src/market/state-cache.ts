@@ -67,6 +67,21 @@ export class MarketStateCache {
     this.poolStrikes.delete(address);
   }
 
+  /** Auto-disable pools that have been stale for too long */
+  autoDisableStalePools(maxAgeMs = 300_000): number {
+    const now = Date.now();
+    let disabled = 0;
+    for (const [addr, pool] of this.pools) {
+      if (now - pool.timestamp > maxAgeMs && !this.disabledPools.has(addr)) {
+        this.disabledPools.add(addr);
+        this.invalidPools.add(addr);
+        disabled++;
+        logInfo(`POOL_AUTO_DISABLED: ${addr.substring(0, 8)}... stale for ${((now - pool.timestamp) / 1000).toFixed(0)}s`);
+      }
+    }
+    return disabled;
+  }
+
   isDisabled(address: string): boolean {
     return this.disabledPools.has(address);
   }
