@@ -43,6 +43,10 @@ export interface BotConfig {
   enableFlowScore: boolean;
   enableTriangular: boolean;
   enableMultiHop: boolean;
+  onlyTier1Pools: boolean;
+  enablePoolHealthSystem: boolean;
+  enableAutoPoolDisable: boolean;
+  enableLightReconciliation: boolean;
 }
 
 function requireEnv(name: string): string {
@@ -116,6 +120,10 @@ function loadConfig(): BotConfig {
   const scanEnableTriangular = requireBool("SCAN_ENABLE_TRIANGULAR", !liveMode);
   const enableFlowScore = requireBool("ENABLE_FLOW_SCORE", !liveMode);
   const enableMultiHop = requireBool("ENABLE_MULTI_HOP", !liveMode);
+  const onlyTier1Pools = requireBool("ONLY_TIER1_POOLS", true);
+  const enablePoolHealthSystem = requireBool("ENABLE_POOL_HEALTH_SYSTEM", true);
+  const enableAutoPoolDisable = requireBool("ENABLE_AUTO_POOL_DISABLE", true);
+  const enableLightReconciliation = requireBool("ENABLE_LIGHT_RECONCILIATION", true);
 
   const maxTradeSol = microCapitalMode ? microCapitalPerTradeSol : requireNumber("MAX_TRADE_SOL", 0.1);
   const quoteSizesSol = microCapitalMode ? [microCapitalPerTradeSol] : parseSizes("QUOTE_SIZES", [0.05, 0.1]);
@@ -143,6 +151,7 @@ function loadConfig(): BotConfig {
     liveMode, microCapitalMode, microCapitalPerTradeSol, microCapitalMaxConcurrent,
     restrictToSolUsdc,
     enableFlowScore, enableTriangular: scanEnableTriangular, enableMultiHop,
+    onlyTier1Pools, enablePoolHealthSystem, enableAutoPoolDisable, enableLightReconciliation,
   };
 
   console.log("Configuración cargada:");
@@ -170,6 +179,10 @@ function loadConfig(): BotConfig {
   console.log(`   RESTRICT SOL/USDC:   ${restrictToSolUsdc ? "ON" : "OFF"}`);
   console.log(`   ENABLE FLOW SCORE:   ${enableFlowScore ? "ON" : "OFF"}`);
   console.log(`   ENABLE MULTI-HOP:    ${enableMultiHop ? "ON" : "OFF"}`);
+  console.log(`   ONLY TIER-1 POOLS:   ${onlyTier1Pools ? "ON" : "OFF"}`);
+  console.log(`   POOL HEALTH SYSTEM:  ${enablePoolHealthSystem ? "ON" : "OFF"}`);
+  console.log(`   AUTO POOL DISABLE:   ${enableAutoPoolDisable ? "ON" : "OFF"}`);
+  console.log(`   LIGHT RECONCIL:      ${enableLightReconciliation ? "ON" : "OFF"}`);
   console.log(`   DRY RUN:             ${dryRun ? "ACTIVADO" : "DESACTIVADO"}`);
 
   if (!dryRun && liveMode) {

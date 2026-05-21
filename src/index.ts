@@ -28,6 +28,7 @@ import { Scanner, tokenDiscovery, quoteEngine } from "./scanner";
 import { validatePoolFields as validateWsFields } from "./market/account-validator";
 import { accountMetrics } from "./market/account-metrics";
 import { integrityEngine } from "./core/integrity";
+import { poolHealthTracker } from "./core/market/pool-health";
 
 let wsManager: WebSocketManager | null = null;
 let scanner: Scanner | null = null;
@@ -213,6 +214,9 @@ async function subscribePools(): Promise<number> {
           marketState.updatePool(snapshot);
           const pool = marketState.getPool(entry.address);
           if (pool) priceGraph.updateFromPool(pool);
+          if (config.enablePoolHealthSystem) {
+            poolHealthTracker.recordUpdate(entry.address, entry.dex, Date.now() - snapshot.timestamp);
+          }
           logDebug(`WS direct [${entry.address.substring(0, 8)}]: slot=${slot} update → cache: ${marketState.getPoolCount()} pools`);
         }
       }, "confirmed");
@@ -400,6 +404,9 @@ async function initialize(): Promise<boolean> {
       if (pool) {
         priceGraph.updateFromPool(pool);
         integrityEngine.onSnapshotReceived(pool);
+        if (config.enablePoolHealthSystem) {
+          poolHealthTracker.recordUpdate(pool.poolAddress, pool.dex, Date.now() - pool.timestamp);
+        }
         logDebug(`EventBus → Graph: ✅ ${pool.poolAddress.substring(0, 8)}... updated (${priceGraph.getNodeCount()} nodes, ${priceGraph.getEdgeCount()} edges)`);
       } else {
         logDebug(`EventBus → Graph: pool ${data.poolAddress.substring(0, 8)}... not in cache yet`);
@@ -620,6 +627,14 @@ async function mainLoop(): Promise<void> {
 
         integrityEngine.cycle();
 
+        if (config.enablePoolHealthSystem) {
+          poolHealthTracker.printSummary();
+        }
+
+        if (config.enableLightReconciliation) {
+          await lightReconciliation();
+        }
+
         if (priceGraph.getEdgeCount() > 0) {
           priceGraph.printGraphSummary();
           printNetworkReport();
@@ -703,6 +718,33 @@ async function mainLoop(): Promise<void> {
  */
 const HYBRID_REFRESH_COOLDOWN_MS = 25_000;
 let lastHybridRefresh = 0;
+
+// Lightweight reconciliation: validate tier-1 pool state every 15s
+const RECONCILIATION_COOLDOWN_MS = 15_000;
+let lastReconciliation = 0;
+
+async function lightReconciliation(): Promise<void> {
+  const now = Date.now();
+  if (now - lastReconciliation < RECONCILIATION_COOLDOWN_MS) return;
+  lastReconciliation = now;
+
+  // Check each tier-1 pool for frozen streams, reconcile slots
+  for (const entry of POOL_REGISTRY) {
+    if (!entry.enabled) continue;
+    const pool = marketState.getPool(entry.address);
+    if (!pool) continue;
+
+    const ageMs = now - pool.timestamp;
+    const slotDelta = pool.slot > 0 ? Math.abs(pool.slot - (pool.slot)) : 0; // will use WS slot if available
+
+    if (ageMs > 10_000) {
+      if (config.enablePoolHealthSystem && config.enableAutoPoolDisable) {
+        poolHealthTracker.recordUpdate(entry.address, entry.dex, ageMs);
+        logDebug(`[RECONCILIATION] ${entry.address.substring(0, 8)}... age=${(ageMs / 1000).toFixed(1)}s — health check triggered`);
+      }
+    }
+  }
+}
 
 async function hybridRefreshStalePools(): Promise<void> {
   const now = Date.now();

@@ -14,6 +14,7 @@ import { profitLedger } from "./profit-ledger";
 import { paperExecution } from "./paper-execution";
 import { integrityEngine } from "../core/integrity";
 import { config } from "../config";
+import { poolHealthTracker } from "../core/market/pool-health";
 
 const MIN_NET_SPREAD_BPS = 0.3;
 const MAX_CANDIDATES = 20;
@@ -153,8 +154,14 @@ export class ExecutableDetector {
           const buy = a.price < b.price ? a : b;
           const sell = a.price < b.price ? b : a;
 
-          if (buy.age > STALE_AGE_MS || sell.age > STALE_AGE_MS) continue;
-          if (Math.abs(buy.slot - sell.slot) > MAX_SLOT_LAG) continue;
+          if (buy.age > STALE_AGE_MS || sell.age > STALE_AGE_MS) {
+            logDebug(`[STALE_ALPHA] ${label} — buy age=${(buy.age / 1000).toFixed(1)}s sell age=${(sell.age / 1000).toFixed(1)}s > ${STALE_AGE_MS}ms`);
+            continue;
+          }
+          if (Math.abs(buy.slot - sell.slot) > MAX_SLOT_LAG) {
+            logDebug(`[STALE_ALPHA] ${label} — slotΔ=${Math.abs(buy.slot - sell.slot)} > ${MAX_SLOT_LAG}`);
+            continue;
+          }
 
           // ═══ INTEGRITY HARD GATE: both pools must be in execution graph ═══
           if (!execGraph.hasExecutionEdge(buy.poolAddress)) {
@@ -174,6 +181,26 @@ export class ExecutableDetector {
           if (!integValid.valid) {
             logDebug(`Executable: SKIP ${label} — integrity fail: ${integValid.reason}`);
             continue;
+          }
+
+          // ═══ POOL HEALTH GATE — reject if any pool is auto-disabled ═══
+          if (config.enablePoolHealthSystem) {
+            if (poolHealthTracker.isDisabled(buy.poolAddress)) {
+              logDebug(`[STALE_ALPHA] SKIP ${label} — buy pool ${buy.poolAddress.substring(0, 8)}... disabled: ${poolHealthTracker.getDisableReason(buy.poolAddress)}`);
+              continue;
+            }
+            if (poolHealthTracker.isDisabled(sell.poolAddress)) {
+              logDebug(`[STALE_ALPHA] SKIP ${label} — sell pool ${sell.poolAddress.substring(0, 8)}... disabled: ${poolHealthTracker.getDisableReason(sell.poolAddress)}`);
+              continue;
+            }
+            if (!poolHealthTracker.isHealthy(buy.poolAddress)) {
+              logDebug(`[STALE_ALPHA] SKIP ${label} — buy pool ${buy.poolAddress.substring(0, 8)}... unhealthy`);
+              continue;
+            }
+            if (!poolHealthTracker.isHealthy(sell.poolAddress)) {
+              logDebug(`[STALE_ALPHA] SKIP ${label} — sell pool ${sell.poolAddress.substring(0, 8)}... unhealthy`);
+              continue;
+            }
           }
 
           const optimal = slippageEstimator.findOptimalTrade(buy.poolAddress, sell.poolAddress);
@@ -251,6 +278,7 @@ export class ExecutableDetector {
           };
 
           found.push(opp);
+          logInfo(`[REAL_ALPHA] CANDIDATE ${label} ${buy.dex}→${sell.dex} net=+${netSpreadBps.toFixed(2)}bps profit=$${optimal.netProfit.toFixed(4)} conf=${(confidence * 100).toFixed(0)}%`);
         }
       }
     }
@@ -420,7 +448,7 @@ export class ExecutableDetector {
         continue;
       }
 
-      logInfo(`Executable: ✅ PROMOTED multi-hop ${mh.symbols} net=+${adjustedNet.toFixed(2)}bps (raw=+${mh.netBps.toFixed(2)}bps latency-decay=${decayBps.toFixed(1)}bps) profit=$${(mh.profitUsd * (1 - decayBps / 100)).toFixed(4)} conf=${(conf * 100).toFixed(0)}% age=${(age/1000).toFixed(1)}s`);
+      logInfo(`[REAL_ALPHA] PROMOTED multi-hop ${mh.symbols} net=+${adjustedNet.toFixed(2)}bps (raw=+${mh.netBps.toFixed(2)}bps latency-decay=${decayBps.toFixed(1)}bps) profit=$${(mh.profitUsd * (1 - decayBps / 100)).toFixed(4)} conf=${(conf * 100).toFixed(0)}% age=${(age/1000).toFixed(1)}s`);
       // Register for paper execution replay
       paperExecution.registerExecutable(
         mh.symbols,

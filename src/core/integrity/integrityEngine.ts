@@ -9,6 +9,7 @@ import { dexHealthMonitor, DexHealthMonitor } from "./dexHealthMonitor";
 import { sameDexGuard } from "./sameDexGuard";
 import { confidenceSanitizer } from "./confidenceSanitizer";
 import { spreadIntegrityValidator } from "./spreadIntegrityValidator";
+import { poolHealthTracker } from "../market/pool-health";
 import { priceGraph } from "../../graph";
 import { marketState, PoolStateSnapshot } from "../../market/state-cache";
 import { logInfo, logWarning, logSuccess } from "../../logger";

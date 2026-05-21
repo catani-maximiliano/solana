@@ -1,6 +1,8 @@
 import { sameDexGuard } from "./sameDexGuard";
 import { confidenceSanitizer } from "./confidenceSanitizer";
 import { poolFreshnessTracker } from "./poolFreshnessTracker";
+import { poolHealthTracker } from "../market/pool-health";
+import { config } from "../../config";
 import { logInfo } from "../../logger";
 
 export interface PoolLeg {
@@ -55,6 +57,16 @@ export class SpreadIntegrityValidator {
       { address: sell.poolAddress, dex: sell.dex, age: sell.ageMs, slotDelta: sell.slotDelta },
     );
     if (!pairCheck.valid) return { valid: false, reason: pairCheck.reasons.join("; ") };
+
+    // 8. Pool health gate (auto-disable check)
+    if (config.enablePoolHealthSystem) {
+      if (poolHealthTracker.isDisabled(buy.poolAddress)) {
+        return { valid: false, reason: `buy pool disabled: ${poolHealthTracker.getDisableReason(buy.poolAddress)}` };
+      }
+      if (poolHealthTracker.isDisabled(sell.poolAddress)) {
+        return { valid: false, reason: `sell pool disabled: ${poolHealthTracker.getDisableReason(sell.poolAddress)}` };
+      }
+    }
 
     return { valid: true };
   }
