@@ -2,6 +2,7 @@ import { sameDexGuard } from "./sameDexGuard";
 import { confidenceSanitizer } from "./confidenceSanitizer";
 import { poolFreshnessTracker } from "./poolFreshnessTracker";
 import { poolHealthTracker } from "../market/pool-health";
+import { poolQualityRegistry } from "../pools/poolQualityRegistry";
 import { config } from "../../config";
 import { logInfo } from "../../logger";
 
@@ -29,15 +30,27 @@ export class SpreadIntegrityValidator {
     if (!sellFresh) return { valid: false, reason: `sell pool ${sell.poolAddress.substring(0, 8)}... not tracked` };
 
     // 2. Age check (per-DEX)
-    const DEX_MAX_AGE: Record<string, number> = { Whirlpool: 5000, "Raydium CLMM": 3000, Raydium: 3000, Meteora: 3000 };
+    const DEX_MAX_AGE: Record<string, number> = { Whirlpool: 3000, "Raydium CLMM": 2000, Raydium: 2000 };
     const buyMaxAge = DEX_MAX_AGE[buy.dex] ?? 5000;
     const sellMaxAge = DEX_MAX_AGE[sell.dex] ?? 5000;
-    if (buy.ageMs > buyMaxAge) return { valid: false, reason: `buy leg stale age=${(buy.ageMs / 1000).toFixed(1)}s > ${buyMaxAge}ms (${buy.dex})` };
-    if (sell.ageMs > sellMaxAge) return { valid: false, reason: `sell leg stale age=${(sell.ageMs / 1000).toFixed(1)}s > ${sellMaxAge}ms (${sell.dex})` };
+    if (buy.ageMs > buyMaxAge) {
+      poolQualityRegistry.recordFakeAlpha(buy.poolAddress);
+      return { valid: false, reason: `buy leg stale age=${(buy.ageMs / 1000).toFixed(1)}s > ${buyMaxAge}ms (${buy.dex})` };
+    }
+    if (sell.ageMs > sellMaxAge) {
+      poolQualityRegistry.recordFakeAlpha(sell.poolAddress);
+      return { valid: false, reason: `sell leg stale age=${(sell.ageMs / 1000).toFixed(1)}s > ${sellMaxAge}ms (${sell.dex})` };
+    }
 
     // 3. Slot consistency
-    if (buy.slotDelta > 8) return { valid: false, reason: `buy leg slotΔ=${buy.slotDelta} > 8` };
-    if (sell.slotDelta > 8) return { valid: false, reason: `sell leg slotΔ=${sell.slotDelta} > 8` };
+    if (buy.slotDelta > 8) {
+      poolQualityRegistry.recordFakeAlpha(buy.poolAddress);
+      return { valid: false, reason: `buy leg slotΔ=${buy.slotDelta} > 8` };
+    }
+    if (sell.slotDelta > 8) {
+      poolQualityRegistry.recordFakeAlpha(sell.poolAddress);
+      return { valid: false, reason: `sell leg slotΔ=${sell.slotDelta} > 8` };
+    }
 
     // 4. Different DEXes
     const dexCheck = sameDexGuard.reject(buy.dex, sell.dex, buy.poolAddress, sell.poolAddress, `${buy.dex}/${sell.dex}`);

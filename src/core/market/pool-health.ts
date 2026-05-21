@@ -1,3 +1,5 @@
+import { poolQualityRegistry } from "../pools/poolQualityRegistry";
+
 const STALE_THRESHOLD_MS = 10_000;
 const MIN_UPDATES_PER_MIN = 5;
 const MAX_STALE_RATE_PCT = 20;
@@ -16,6 +18,8 @@ interface PoolHealthData {
   lastEnabledTime: number;
 }
 
+export type ExecutionGrade = "EXECUTION" | "DEGRADED" | "DEAD_POOL";
+
 export interface PoolHealthReport {
   poolAddress: string;
   dex: string;
@@ -23,6 +27,7 @@ export interface PoolHealthReport {
   avgAgeMs: number;
   staleRatePct: number;
   score: number;
+  grade: ExecutionGrade;
   disabled: boolean;
   disabledReason?: string;
 }
@@ -44,12 +49,10 @@ export class PoolHealthTracker {
     if (ageMs > STALE_THRESHOLD_MS) d.staleCount++;
     d.lastUpdateTime = now;
 
-    // Trim window
     const cutoff = now - WINDOW_MS;
     while (d.updates.length > 0 && d.updates[0] < cutoff) d.updates.shift();
     while (d.ages.length > 100) d.ages.shift();
 
-    // Auto-disable
     const report = this.computeReport(poolAddress);
     if (report && !d.disabled) {
       const shouldDisable = report.updatesPerMin < MIN_UPDATES_PER_MIN || report.staleRatePct > MAX_STALE_RATE_PCT;
@@ -81,6 +84,11 @@ export class PoolHealthTracker {
     const staleScore = 100 - staleRate;
     const score = Math.round((ageScore * 0.3 + freqScore * 0.4 + staleScore * 0.3));
 
+    const grade: ExecutionGrade =
+      updatesPerMin >= 30 && avgAge < 1000 && staleRate < 5 ? "EXECUTION"
+      : updatesPerMin >= 5 ? "DEGRADED"
+      : "DEAD_POOL";
+
     return {
       poolAddress,
       dex: d.dex,
@@ -88,6 +96,7 @@ export class PoolHealthTracker {
       avgAgeMs: Math.round(avgAge),
       staleRatePct: Math.round(staleRate * 10) / 10,
       score,
+      grade,
       disabled: d.disabled,
       disabledReason: d.disabledReason,
     };
@@ -124,11 +133,12 @@ export class PoolHealthTracker {
     if (reports.length === 0) return;
     for (const r of reports) {
       console.log(`  [POOL_HEALTH] ${r.dex} ${r.poolAddress.substring(0, 8)}...`);
-      console.log(`    updates/min=${r.updatesPerMin}  avgAge=${r.avgAgeMs}ms  staleRate=${r.staleRatePct}%  score=${r.score}`);
+      console.log(`    updates=${r.updatesPerMin}/min  avgAge=${r.avgAgeMs}ms  stale=${r.staleRatePct}%  grade=${r.grade}`);
       if (r.disabled) {
         console.log(`  [POOL_DISABLED] ${r.poolAddress.substring(0, 8)}... disabled: ${r.disabledReason}`);
       }
     }
+    poolQualityRegistry.printFakeAlphaDashboard();
   }
 
   reset(): void {

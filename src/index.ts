@@ -29,6 +29,7 @@ import { validatePoolFields as validateWsFields } from "./market/account-validat
 import { accountMetrics } from "./market/account-metrics";
 import { integrityEngine } from "./core/integrity";
 import { poolHealthTracker } from "./core/market/pool-health";
+import { poolQualityRegistry } from "./core/pools/poolQualityRegistry";
 
 let wsManager: WebSocketManager | null = null;
 let scanner: Scanner | null = null;
@@ -216,6 +217,8 @@ async function subscribePools(): Promise<number> {
           if (pool) priceGraph.updateFromPool(pool);
           if (config.enablePoolHealthSystem) {
             poolHealthTracker.recordUpdate(entry.address, entry.dex, Date.now() - snapshot.timestamp);
+            const slotDrift = pool ? Math.abs(slot - pool.slot) : 0;
+            poolQualityRegistry.recordUpdate(entry.address, entry.dex, Date.now() - snapshot.timestamp, slotDrift);
           }
           logDebug(`WS direct [${entry.address.substring(0, 8)}]: slot=${slot} update → cache: ${marketState.getPoolCount()} pools`);
         }
@@ -406,6 +409,7 @@ async function initialize(): Promise<boolean> {
         integrityEngine.onSnapshotReceived(pool);
         if (config.enablePoolHealthSystem) {
           poolHealthTracker.recordUpdate(pool.poolAddress, pool.dex, Date.now() - pool.timestamp);
+          poolQualityRegistry.recordUpdate(pool.poolAddress, pool.dex, Date.now() - pool.timestamp, 0);
         }
         logDebug(`EventBus → Graph: ✅ ${pool.poolAddress.substring(0, 8)}... updated (${priceGraph.getNodeCount()} nodes, ${priceGraph.getEdgeCount()} edges)`);
       } else {
@@ -740,6 +744,7 @@ async function lightReconciliation(): Promise<void> {
     if (ageMs > 10_000) {
       if (config.enablePoolHealthSystem && config.enableAutoPoolDisable) {
         poolHealthTracker.recordUpdate(entry.address, entry.dex, ageMs);
+        poolQualityRegistry.recordUpdate(entry.address, entry.dex, ageMs, 0);
         logDebug(`[RECONCILIATION] ${entry.address.substring(0, 8)}... age=${(ageMs / 1000).toFixed(1)}s — health check triggered`);
       }
     }

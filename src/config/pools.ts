@@ -24,7 +24,7 @@ export interface PoolRegistryEntry {
 
 export const POOL_REGISTRY: PoolRegistryEntry[] = [
   // ════════════════════════════════════════════════════════════════
-  // TIER 1 — SOL/USDC pools with real activity
+  // EXECUTION-GRADE — SOL/USDC pools with real HFT activity
   // ════════════════════════════════════════════════════════════════
 
   // SOL/USDC — Orca Whirlpool ts=4 — $23-30M TVL — PRIMARY
@@ -47,27 +47,7 @@ export const POOL_REGISTRY: PoolRegistryEntry[] = [
     tier: 1,
   },
 
-  // SOL/USDC — Orca Whirlpool ts=64 — $200K TVL — fee ref
-  {
-    address: "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ",
-    pair: "SOL/USDC",
-    dex: "Whirlpool",
-    type: "clmm",
-    programKey: "whirlpool",
-    mintA: "So11111111111111111111111111111111111111112",
-    mintB: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    symbolA: "SOL",
-    symbolB: "USDC",
-    decimalsA: 9,
-    decimalsB: 6,
-    tickSpacing: 64,
-    feeBps: 1,
-    verified: true,
-    enabled: true,
-    tier: 1,
-  },
-
-  // SOL/USDC — Raydium CLMM ts=1 0.01% — $5.27M TVL — PRIMARY
+  // SOL/USDC — Raydium CLMM ts=1 — $5.27M TVL — PRIMARY
   {
     address: "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
     pair: "SOL/USDC",
@@ -86,12 +66,32 @@ export const POOL_REGISTRY: PoolRegistryEntry[] = [
     enabled: true,
     tier: 1,
   },
+
+  // SOL/USDC — Raydium CLMM (legacy) — $2.1M TVL — SECONDARY
+  {
+    address: "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
+    pair: "SOL/USDC",
+    dex: "Raydium CLMM",
+    type: "clmm",
+    programKey: "raydiumClmm",
+    mintA: "So11111111111111111111111111111111111111112",
+    mintB: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    symbolA: "SOL",
+    symbolB: "USDC",
+    decimalsA: 9,
+    decimalsB: 6,
+    tickSpacing: 1,
+    feeBps: 5,
+    verified: true,
+    enabled: true,
+    tier: 1,
+  },
 ];
 
 // ── Blacklist: pools that must NEVER be subscribed or used ──
 export const POOL_BLACKLIST: string[] = [
+  "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ", // Whirlpool ts=64 1bps — low activity $200K TVL, stale >100s
   "2QdhepnKRTLjjSqPL1PtKNwqrUkoLee5Gqs8bvZhRdMv", // SOL/USDC Raydium ts=8 — low activity $522K TVL
-  "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv", // SOL/USDC Raydium (legacy) — duplicate of 8sLbNZoA
   "CYbD9RaToYMtWKA7QZyoLahnHdWq553Vm62Lh6qWtuxq", // SOL/USDC — 25bps stale
 ];
 

@@ -15,6 +15,7 @@ import { paperExecution } from "./paper-execution";
 import { integrityEngine } from "../core/integrity";
 import { config } from "../config";
 import { poolHealthTracker } from "../core/market/pool-health";
+import { poolQualityRegistry } from "../core/pools/poolQualityRegistry";
 
 const MIN_NET_SPREAD_BPS = 0.3;
 const MAX_CANDIDATES = 20;
@@ -28,13 +29,16 @@ const SIMULATED_LATENCY_MS = 2_000;
 const SLIPPAGE_DECAY_PER_SEC = 0.3;
 const WARMUP_MS = 45_000;
 
-// Per-DEX max age limits
+// Per-DEX max age limits (strict — execution grade only)
 const DEX_MAX_AGE: Record<string, number> = {
-  Whirlpool: 5000,
-  "Raydium CLMM": 3000,
-  Raydium: 3000,
-  Meteora: 3000,
+  Whirlpool: 3000,
+  "Raydium CLMM": 2000,
+  Raydium: 2000,
 };
+
+// Max age delta between legs
+const MAX_AGE_DELTA_MS = 3000;
+const MAX_SLOT_LAG_STRICT = 20;
 const STARTUP_TIME = Date.now();
 
 export class ExecutableDetector {
@@ -155,11 +159,31 @@ export class ExecutableDetector {
           const sell = a.price < b.price ? b : a;
 
           if (buy.age > STALE_AGE_MS || sell.age > STALE_AGE_MS) {
+            poolQualityRegistry.recordFakeAlpha(buy.poolAddress);
+            poolQualityRegistry.recordFakeAlpha(sell.poolAddress);
             logDebug(`[STALE_ALPHA] ${label} — buy age=${(buy.age / 1000).toFixed(1)}s sell age=${(sell.age / 1000).toFixed(1)}s > ${STALE_AGE_MS}ms`);
             continue;
           }
           if (Math.abs(buy.slot - sell.slot) > MAX_SLOT_LAG) {
+            poolQualityRegistry.recordFakeAlpha(buy.poolAddress);
+            poolQualityRegistry.recordFakeAlpha(sell.poolAddress);
             logDebug(`[STALE_ALPHA] ${label} — slotΔ=${Math.abs(buy.slot - sell.slot)} > ${MAX_SLOT_LAG}`);
+            continue;
+          }
+
+          // FAKE_ALPHA gate: strict slotΔ and ageΔ thresholds
+          const slotDelta = Math.abs(buy.slot - sell.slot);
+          const ageDelta = Math.abs(buy.age - sell.age);
+          if (slotDelta > MAX_SLOT_LAG_STRICT) {
+            poolQualityRegistry.recordFakeAlpha(buy.poolAddress);
+            poolQualityRegistry.recordFakeAlpha(sell.poolAddress);
+            logDebug(`[FAKE_ALPHA] ${label} — slotΔ=${slotDelta} > ${MAX_SLOT_LAG_STRICT} (buy=${buy.slot} sell=${sell.slot})`);
+            continue;
+          }
+          if (ageDelta > MAX_AGE_DELTA_MS) {
+            poolQualityRegistry.recordFakeAlpha(buy.poolAddress);
+            poolQualityRegistry.recordFakeAlpha(sell.poolAddress);
+            logDebug(`[FAKE_ALPHA] ${label} — ageΔ=${(ageDelta / 1000).toFixed(1)}s > ${MAX_AGE_DELTA_MS}ms (buy=${(buy.age / 1000).toFixed(1)}s sell=${(sell.age / 1000).toFixed(1)}s)`);
             continue;
           }
 
@@ -186,21 +210,37 @@ export class ExecutableDetector {
           // ═══ POOL HEALTH GATE — reject if any pool is auto-disabled ═══
           if (config.enablePoolHealthSystem) {
             if (poolHealthTracker.isDisabled(buy.poolAddress)) {
+              poolQualityRegistry.recordFakeAlpha(buy.poolAddress);
               logDebug(`[STALE_ALPHA] SKIP ${label} — buy pool ${buy.poolAddress.substring(0, 8)}... disabled: ${poolHealthTracker.getDisableReason(buy.poolAddress)}`);
               continue;
             }
             if (poolHealthTracker.isDisabled(sell.poolAddress)) {
+              poolQualityRegistry.recordFakeAlpha(sell.poolAddress);
               logDebug(`[STALE_ALPHA] SKIP ${label} — sell pool ${sell.poolAddress.substring(0, 8)}... disabled: ${poolHealthTracker.getDisableReason(sell.poolAddress)}`);
               continue;
             }
             if (!poolHealthTracker.isHealthy(buy.poolAddress)) {
+              poolQualityRegistry.recordFakeAlpha(buy.poolAddress);
               logDebug(`[STALE_ALPHA] SKIP ${label} — buy pool ${buy.poolAddress.substring(0, 8)}... unhealthy`);
               continue;
             }
             if (!poolHealthTracker.isHealthy(sell.poolAddress)) {
+              poolQualityRegistry.recordFakeAlpha(sell.poolAddress);
               logDebug(`[STALE_ALPHA] SKIP ${label} — sell pool ${sell.poolAddress.substring(0, 8)}... unhealthy`);
               continue;
             }
+          }
+
+          // ═══ EXECUTION-GRADE GATE — reject if pool quality < 0.8 ═══
+          if (!poolQualityRegistry.isExecutionGrade(buy.poolAddress)) {
+            poolQualityRegistry.recordFakeAlpha(buy.poolAddress);
+            logDebug(`[FAKE_ALPHA] SKIP ${label} — buy pool ${buy.poolAddress.substring(0, 8)}... not execution grade`);
+            continue;
+          }
+          if (!poolQualityRegistry.isExecutionGrade(sell.poolAddress)) {
+            poolQualityRegistry.recordFakeAlpha(sell.poolAddress);
+            logDebug(`[FAKE_ALPHA] SKIP ${label} — sell pool ${sell.poolAddress.substring(0, 8)}... not execution grade`);
+            continue;
           }
 
           const optimal = slippageEstimator.findOptimalTrade(buy.poolAddress, sell.poolAddress);
@@ -278,6 +318,8 @@ export class ExecutableDetector {
           };
 
           found.push(opp);
+          poolQualityRegistry.recordSpreadInvolvement(buy.poolAddress);
+          poolQualityRegistry.recordSpreadInvolvement(sell.poolAddress);
           logInfo(`[REAL_ALPHA] CANDIDATE ${label} ${buy.dex}→${sell.dex} net=+${netSpreadBps.toFixed(2)}bps profit=$${optimal.netProfit.toFixed(4)} conf=${(confidence * 100).toFixed(0)}%`);
         }
       }
