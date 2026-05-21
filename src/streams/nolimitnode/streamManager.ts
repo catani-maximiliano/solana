@@ -5,7 +5,7 @@ import { NlnStreamState, NlnHealthReport, NormalizedSwapEvent } from "./types";
 import { logInfo, logSuccess, logWarning, logDebug } from "../../logger";
 import { EventEmitter } from "events";
 
-const API_KEY = process.env.SOLANA_API_KEY || "sk_live_WyFos0McoGTo53GhVpaDXqS9FYT0QuZy";
+const API_KEY = process.env.SOLANA_API_KEY || "";
 const BASE_RECONNECT_DELAY = 2000;
 const STALE_THRESHOLD_MS = 15_000;
 

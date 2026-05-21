@@ -3,14 +3,19 @@ import { flowEngine } from "../flow/flowEngine";
 import { orderbookState } from "../orderbook/orderbookState";
 import { persistenceTracker } from "../microstructure/persistenceTracker";
 import { volatilityWindow } from "../microstructure/volatilityWindow";
+import { config } from "../../config";
 
 export function computeConfidence(
   pair: string,
   pool: string,
 ): ConfidenceBreakdown {
-  // Flow confidence: balanced flow = higher confidence
-  const flow = flowEngine.getPoolFlow(pool);
-  const flowScore = flow ? 1 - Math.abs(flow.buyRatio - 0.5) * 2 : 0.5;
+  // Flow confidence: TEMPORARILY DISABLED in LIVE/MICRO mode
+  const flowScore = (!config.liveMode && !config.microCapitalMode && config.enableFlowScore)
+    ? (() => {
+        const flow = flowEngine.getPoolFlow(pool);
+        return flow ? 1 - Math.abs(flow.buyRatio - 0.5) * 2 : 0.5;
+      })()
+    : 0.5;
 
   // Orderbook confidence: balanced = higher
   const ob = orderbookState.get(pair);
@@ -23,8 +28,11 @@ export function computeConfidence(
   const vol = volatilityWindow.getSnapshot(pair);
   const volScore = vol.regime === "LOW" ? 0.9 : vol.regime === "MEDIUM" ? 0.6 : vol.regime === "HIGH" ? 0.3 : 0.1;
 
-  // Overall
-  const overall = flowScore * 0.25 + obScore * 0.25 + persistScore * 0.25 + volScore * 0.25;
+  // Rebalance weights when flowScore is disabled
+  const flowWt = config.enableFlowScore ? 0.25 : 0;
+  const otherWt = config.enableFlowScore ? 0.25 : 0.333;
+
+  const overall = flowScore * flowWt + obScore * otherWt + persistScore * otherWt + volScore * otherWt;
 
   return {
     flow: Math.round(flowScore * 100) / 100,

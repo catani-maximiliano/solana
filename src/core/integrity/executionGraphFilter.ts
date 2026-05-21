@@ -4,17 +4,16 @@ import { marketState } from "../../market/state-cache";
 import { PoolState } from "./types";
 import { poolFreshnessTracker } from "./poolFreshnessTracker";
 import { streamHeartbeatMonitor } from "./streamHeartbeatMonitor";
-import { logInfo } from "../../logger";
+import { dexHealthMonitor } from "./dexHealthMonitor";
+import { logInfo, logWarning } from "../../logger";
 
 const MAX_EXECUTION_AGE_MS = 1500;
 const MAX_SLOT_DELTA = 8;
 
-export class ExecutionGraphFilter {
+export class ExecutionGraphBuilder {
   private lastExecutionEdges: ExecutionEdge[] = [];
   private lastComputedAt = 0;
-  private staleRemovedCount = 0;
-  private corruptRemovedCount = 0;
-  private deadRemovedCount = 0;
+  private rejectCounts = { stale: 0, slot: 0, sameDex: 0, invalidPrice: 0, dexDisabled: 0, corrupt: 0, dead: 0 };
 
   compute(): ExecutionGraph {
     const allEdges = priceGraph.getAllEdgesRaw();
@@ -23,46 +22,57 @@ export class ExecutionGraphFilter {
     const seenPools = new Set<string>();
     const pairSet = new Set<string>();
     const nodeSet = new Set<string>();
+    const counters = { stale: 0, slot: 0, sameDex: 0, invalidPrice: 0, dexDisabled: 0, corrupt: 0, dead: 0 };
 
     for (const edge of allEdges) {
-      if (edge.health !== "VALID") continue;
+      if (edge.health !== "VALID") { counters.stale++; continue; }
       if (seenPools.has(edge.poolAddress)) continue;
       seenPools.add(edge.poolAddress);
 
       const ageMs = now - edge.timestamp;
       const freshness = poolFreshnessTracker.getFreshness(edge.poolAddress);
       const poolState = freshness?.state ?? PoolState.DEAD;
-      const slotDelta = freshness?.slotDelta ?? 999;
-      const streamAlive = streamHeartbeatMonitor.isStreamAlive(edge.dex);
+      const slotDelta = freshness?.slotDelta ?? 0;
 
+      // Early rejection: CORRUPT
       if (poolState === PoolState.CORRUPT) {
-        this.corruptRemovedCount++;
+        counters.corrupt++;
+        logInfo(`[EXEC_GRAPH] REJECT ${edge.dex} ${edge.poolAddress.substring(0, 8)}... CORRUPT`);
         continue;
       }
 
+      // Early rejection: DEAD
       if (poolState === PoolState.DEAD) {
-        this.deadRemovedCount++;
+        counters.dead++;
+        logInfo(`[EXEC_GRAPH] REJECT ${edge.dex} ${edge.poolAddress.substring(0, 8)}... DEAD`);
         continue;
       }
 
+      // Early rejection: age > 1.5s
       if (ageMs > MAX_EXECUTION_AGE_MS) {
-        this.staleRemovedCount++;
-        poolFreshnessTracker.forceMarkDead(edge.poolAddress, `age=${(ageMs / 1000).toFixed(1)}s > ${MAX_EXECUTION_AGE_MS}ms`);
+        counters.stale++;
+        logInfo(`[EXEC_GRAPH] REJECT ${edge.dex} ${edge.poolAddress.substring(0, 8)}... STALE age=${(ageMs / 1000).toFixed(1)}s`);
+        poolFreshnessTracker.forceMarkDead(edge.poolAddress, `age ${(ageMs / 1000).toFixed(1)}s > 1.5s`);
         continue;
       }
 
+      // Early rejection: slotΔ > 8
       if (slotDelta > MAX_SLOT_DELTA) {
-        this.staleRemovedCount++;
+        counters.slot++;
+        logInfo(`[EXEC_GRAPH] REJECT ${edge.dex} ${edge.poolAddress.substring(0, 8)}... slotΔ=${slotDelta} > 8`);
         continue;
       }
 
-      if (!streamAlive) {
-        this.deadRemovedCount++;
+      // Early rejection: DEX disabled
+      if (!dexHealthMonitor.isDexEnabled(edge.dex)) {
+        counters.dexDisabled++;
         continue;
       }
 
-      if (edge.price <= 0 || edge.liquidity <= 0) {
-        this.corruptRemovedCount++;
+      // Early rejection: invalid price/liquidity
+      if (edge.price <= 0 || edge.liquidity <= 0 || !isFinite(edge.price)) {
+        counters.invalidPrice++;
+        poolFreshnessTracker.forceMarkCorrupt(edge.poolAddress, `price=${edge.price} liq=${edge.liquidity}`);
         continue;
       }
 
@@ -92,6 +102,7 @@ export class ExecutionGraphFilter {
 
     this.lastExecutionEdges = execEdges;
     this.lastComputedAt = now;
+    this.rejectCounts = counters;
 
     const freshness: "FRESH" | "DEGRADED" | "BLOCKED" =
       execEdges.length >= 4 ? "FRESH"
@@ -123,40 +134,33 @@ export class ExecutionGraphFilter {
     return this.lastExecutionEdges.filter((e) => e.from === from && e.to === to);
   }
 
+  getPairLabels(): string[] {
+    const pairs = new Set<string>();
+    for (const e of this.lastExecutionEdges) {
+      pairs.add(`${priceGraph.mintToSymbol(e.from)}/${priceGraph.mintToSymbol(e.to)}`);
+    }
+    return Array.from(pairs);
+  }
+
   getFreshness(): "FRESH" | "DEGRADED" | "BLOCKED" {
     if (this.lastExecutionEdges.length >= 4) return "FRESH";
     if (this.lastExecutionEdges.length > 0) return "DEGRADED";
     return "BLOCKED";
   }
 
+  getRejectCounts() {
+    return { ...this.rejectCounts };
+  }
+
   resetCounters(): void {
-    this.staleRemovedCount = 0;
-    this.corruptRemovedCount = 0;
-    this.deadRemovedCount = 0;
-  }
-
-  getCounters(): { staleRemoved: number; corruptRemoved: number; deadRemoved: number } {
-    return {
-      staleRemoved: this.staleRemovedCount,
-      corruptRemoved: this.corruptRemovedCount,
-      deadRemoved: this.deadRemovedCount,
-    };
-  }
-
-  logFilterResult(): void {
-    const c = this.getCounters();
-    const exec = this.lastExecutionEdges.length;
-    const freshness = this.getFreshness();
-    logInfo(`[EXEC_GRAPH] ${exec} executable edges | removed: ${c.staleRemoved} stale, ${c.corruptRemoved} corrupt, ${c.deadRemoved} dead | freshness=${freshness}`);
+    this.rejectCounts = { stale: 0, slot: 0, sameDex: 0, invalidPrice: 0, dexDisabled: 0, corrupt: 0, dead: 0 };
   }
 
   clear(): void {
     this.lastExecutionEdges = [];
     this.lastComputedAt = 0;
-    this.staleRemovedCount = 0;
-    this.corruptRemovedCount = 0;
-    this.deadRemovedCount = 0;
+    this.resetCounters();
   }
 }
 
-export const executionGraphFilter = new ExecutionGraphFilter();
+export const executionGraphBuilder = new ExecutionGraphBuilder();

@@ -21,7 +21,7 @@ import { graphAudit } from "./graph/graph-audit";
 import { startEventDrivenEngine } from "./core/event-driven/EventDrivenEngine";
 import { eventScheduler } from "./scheduler";
 import { marketValidator } from "./market-validator";
-import { POOL_REGISTRY, POOL_BLACKLIST, getPoolSummary } from "./config/pools";
+import { POOL_REGISTRY, POOL_BLACKLIST, getPoolSummary, getEnabledPools } from "./config/pools";
 import { sqrtPriceX64ToPrice } from "./math";
 import { stateConsistency } from "./state-consistency";
 import { Scanner, tokenDiscovery, quoteEngine } from "./scanner";
@@ -97,12 +97,18 @@ async function startProviders(): Promise<void> {
 
 async function subscribePools(): Promise<number> {
   logInfo("Paso 5: Subscribiendo pools...");
-  if (POOL_REGISTRY.length === 0) {
-    logWarning("  Pool registry vacío — no hay pools para subscribir");
+
+  // Restrict universe if configured
+  const activePools = config.restrictToSolUsdc
+    ? POOL_REGISTRY.filter(p => p.enabled && p.pair === "SOL/USDC")
+    : POOL_REGISTRY.filter(p => p.enabled);
+
+  if (activePools.length === 0) {
+    logWarning("  Active pool list vacío — no hay pools para subscribir");
     return 0;
   }
 
-  for (const entry of POOL_REGISTRY) {
+  for (const entry of activePools) {
     pairState.registerPool(entry.pair, entry.address);
     const pair = pairState.getPair(entry.pair);
     if (pair && !pair.poolAddresses.includes(entry.address)) {
@@ -114,14 +120,14 @@ async function subscribePools(): Promise<number> {
     priceGraph.seedFromRegistry(entry.address, entry.mintA, entry.mintB, entry.dex);
   }
 
-  recordStartup("Pool registry cargado", true, getPoolSummary());
+  recordStartup("Pool registry cargado", true, getPoolSummary(config.restrictToSolUsdc));
 
   let subscribed = 0;
   let providerSubscribed = 0;
   const activeWsSubscriptions = new Set<string>(); // track pools already subscribed by providers
 
   for (const provider of config.directPoolProviders) {
-    const poolAddrs = POOL_REGISTRY.filter((p) => p.dex === provider.dexName);
+    const poolAddrs = activePools.filter((p) => p.dex === provider.dexName);
     logDebug(`  ${provider.dexName}: ${poolAddrs.length} pools para subscribir`);
 
     for (const pool of poolAddrs) {
@@ -147,7 +153,7 @@ async function subscribePools(): Promise<number> {
     }
   }
 
-  for (const entry of POOL_REGISTRY) {
+  for (const entry of activePools) {
     if (wsManager && entry.address) {
       // Skip blacklisted pools
       if (POOL_BLACKLIST.includes(entry.address)) {
@@ -354,7 +360,10 @@ async function initialize(): Promise<boolean> {
     logInfo("RPC: bootstrap only | WS: disabled | Polling: disabled");
 
     // Bootstrap snapshot ONCE via RPC
-    for (const entry of POOL_REGISTRY) {
+    const nlnPools = config.restrictToSolUsdc
+      ? POOL_REGISTRY.filter(p => p.enabled && p.pair === "SOL/USDC")
+      : POOL_REGISTRY.filter(p => p.enabled);
+    for (const entry of nlnPools) {
       marketState.registerPoolFromRegistry(entry.address, entry.mintA, entry.mintB, entry.dex, entry.decimalsA, entry.decimalsB);
       priceGraph.seedFromRegistry(entry.address, entry.mintA, entry.mintB, entry.dex);
     }
@@ -433,12 +442,15 @@ async function initialize(): Promise<boolean> {
   console.log(`  RPC:                    ${rpcOk ? "✅" : "❌"}`);
   console.log(`  WS:                     ${wsOk ? "✅" : "❌"}`);
   console.log(`  WS subs:                ${wsMetrics?.subscriptionsCount || 0}`);
-  console.log(`  Pool registry:          ${POOL_REGISTRY.length} pools`);
-  const multiPoolPairs = [...new Set(POOL_REGISTRY.filter((p, i, arr) => arr.findIndex((x) => x.pair === p.pair) !== i).map((p) => p.pair))];
+  const activePoolsDisplay = config.restrictToSolUsdc
+    ? POOL_REGISTRY.filter(p => p.enabled && p.pair === "SOL/USDC")
+    : POOL_REGISTRY.filter(p => p.enabled);
+  console.log(`  Pool registry:          ${POOL_REGISTRY.length} pools (${activePoolsDisplay.length} activos)`);
+  const multiPoolPairs = [...new Set(activePoolsDisplay.filter((p, i, arr) => arr.findIndex((x) => x.pair === p.pair) !== i).map((p) => p.pair))];
   if (multiPoolPairs.length > 0) {
     console.log(`  Multi-pool pairs:       ${multiPoolPairs.join(", ")}`);
   }
-  for (const p of POOL_REGISTRY) {
+  for (const p of activePoolsDisplay) {
     console.log(`    ${p.dex}: ${p.address.substring(0, 12)}... (${p.pair})`);
   }
 
@@ -701,7 +713,10 @@ async function hybridRefreshStalePools(): Promise<void> {
   let refreshed = 0;
   const currentSlot = await rpcConnection.getSlot("confirmed").catch(() => 0);
 
-  for (const entry of POOL_REGISTRY) {
+  const activeRefreshPools = config.restrictToSolUsdc
+    ? POOL_REGISTRY.filter(p => p.enabled && p.pair === "SOL/USDC")
+    : POOL_REGISTRY.filter(p => p.enabled);
+  for (const entry of activeRefreshPools) {
     const poolSnapshot = marketState.getPool(entry.address);
     const lastUpdate = poolSnapshot ? now - poolSnapshot.timestamp : Infinity;
     const hasInvalidSlot = !poolSnapshot || poolSnapshot.slot <= 0;

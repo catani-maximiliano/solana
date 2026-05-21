@@ -3,16 +3,19 @@ import { priceGraph } from "../../graph";
 import { poolFreshnessTracker } from "./poolFreshnessTracker";
 import { streamHeartbeatMonitor } from "./streamHeartbeatMonitor";
 import { corruptSnapshotDetector } from "./corruptSnapshotDetector";
-import { executionGraphFilter } from "./executionGraphFilter";
+import { executionGraphBuilder } from "./executionGraphFilter";
 import { logInfo, logWarning } from "../../logger";
 
 const HEALTH_CHECK_INTERVAL_MS = 10000;
-const DISABLE_THRESHOLD = 0.4;
-const DEGRADE_THRESHOLD = 0.6;
+const SILENT_DISABLE_MS = 5000;
+const STALE_RATIO_QUARANTINE = 0.4;
+const STALE_RATIO_DISABLE = 0.6;
 
 export class DexHealthMonitor {
   private lastCheck = 0;
   private scores = new Map<string, DexHealthScore>();
+  private disabledDexes = new Set<string>();
+  private quarantinedDexes = new Set<string>();
 
   check(): DexHealthScore[] {
     const now = Date.now();
@@ -26,16 +29,35 @@ export class DexHealthMonitor {
 
     for (const dex of knownDexes) {
       const score = this.computeDexScore(dex);
-      const state = score >= DISABLE_THRESHOLD
-        ? score >= DEGRADE_THRESHOLD ? "OK" as const : "DEGRADED" as const
-        : "DISABLED" as const;
+      const staleRatio = poolFreshnessTracker.getStaleRatio(dex);
+      const streamHealth = streamHeartbeatMonitor.getDexHealth(dex);
+      const silentMs = streamHealth?.silentDurationMs ?? 0;
+
+      // Hard rules
+      let state: "OK" | "DEGRADED" | "DISABLED" = "OK";
+
+      if (silentMs > SILENT_DISABLE_MS || staleRatio >= STALE_RATIO_DISABLE) {
+        state = "DISABLED";
+        this.disabledDexes.add(dex);
+        if (silentMs > SILENT_DISABLE_MS) {
+          logWarning(`[DEX] ${dex} DISABLED no events ${(silentMs / 1000).toFixed(1)}s`);
+        }
+        if (staleRatio >= STALE_RATIO_DISABLE) {
+          logWarning(`[DEX] ${dex} DISABLED staleRatio=${(staleRatio * 100).toFixed(0)}%`);
+        }
+      } else if (staleRatio >= STALE_RATIO_QUARANTINE) {
+        state = "DEGRADED";
+        this.quarantinedDexes.add(dex);
+        logWarning(`[DEX] ${dex} QUARANTINED staleRatio=${(staleRatio * 100).toFixed(0)}%`);
+      } else {
+        this.disabledDexes.delete(dex);
+        this.quarantinedDexes.delete(dex);
+      }
 
       const s: DexHealthScore = {
-        dex,
-        score,
-        state,
-        freshnessRate: score,
-        corruptionRate: 1 - score,
+        dex, score, state,
+        freshnessRate: 1 - staleRatio,
+        corruptionRate: 0,
         reconnectRate: 0,
         eventQuality: score,
         trackedPools: 0,
@@ -51,15 +73,9 @@ export class DexHealthMonitor {
 
   private discoverDexes(): string[] {
     const dexSet = new Set<string>();
-
-    for (const f of poolFreshnessTracker.getAllFreshness()) {
-      dexSet.add(f.dex);
-    }
-
-    for (const h of streamHeartbeatMonitor.getAllDexHealth()) {
-      dexSet.add(h.dex);
-    }
-
+    for (const f of poolFreshnessTracker.getAllFreshness()) dexSet.add(f.dex);
+    for (const h of streamHeartbeatMonitor.getAllDexHealth()) dexSet.add(h.dex);
+    for (const e of executionGraphBuilder.getExecutionEdges()) dexSet.add(e.dex);
     return Array.from(dexSet);
   }
 
@@ -68,7 +84,6 @@ export class DexHealthMonitor {
     if (!streamHealth) return 0;
 
     let score = 0;
-
     const epsScore = Math.min(1, streamHealth.eventsPerSec / 10) * 0.25;
     score += epsScore;
 
@@ -81,34 +96,36 @@ export class DexHealthMonitor {
     const reconnectPenalty = Math.min(1, streamHealth.reconnectCount / 5) * 0.15;
     score += (1 - reconnectPenalty) * 0.15;
 
-    const freshnessEntries = poolFreshnessTracker.getAllFreshness().filter((f) => f.dex === dex);
-    const total = freshnessEntries.length;
-    if (total > 0) {
-      const freshCount = freshnessEntries.filter((f) => f.state === PoolState.FRESH).length;
-      const freshRatio = freshCount / total;
-      score += freshRatio * 0.25;
-
-      const corruptCount = freshnessEntries.filter((f) => f.state === PoolState.CORRUPT).length;
-      const corruptPenalty = Math.min(1, corruptCount / Math.max(1, total)) * 0.10;
-      score -= corruptPenalty;
-    }
+    const staleRatio = poolFreshnessTracker.getStaleRatio(dex);
+    score += (1 - staleRatio) * 0.25;
 
     const recentCorrupt = corruptSnapshotDetector.getRecentCorruptPools();
     const dexCorruptCount = recentCorrupt.filter((addr) => {
       const f = poolFreshnessTracker.getFreshness(addr);
       return f?.dex === dex;
     }).length;
-    const corruptPenalty2 = Math.min(1, dexCorruptCount / 5) * 0.10;
-    score -= corruptPenalty2;
+    const corruptPenalty = Math.min(1, dexCorruptCount / 5) * 0.10;
+    score -= corruptPenalty;
+
+    const freshCount = poolFreshnessTracker.getAllFreshness().filter((f) => f.dex === dex && f.state === PoolState.FRESH).length;
+    const freshnessBonus = Math.min(1, freshCount / 5) * 0.10;
+    score += freshnessBonus;
 
     score = Math.max(0, Math.min(1, score));
     return Math.round(score * 100) / 100;
   }
 
   isDexEnabled(dex: string): boolean {
+    if (this.disabledDexes.has(dex)) return false;
+    return true;
+  }
+
+  isDexHealthy(dex: string): boolean {
     const s = this.scores.get(dex);
     if (!s) return true;
-    return s.score >= DISABLE_THRESHOLD;
+    if (s.state === "DISABLED") return false;
+    if (s.state === "DEGRADED") return false;
+    return true;
   }
 
   getDexScore(dex: string): number {
@@ -119,17 +136,27 @@ export class DexHealthMonitor {
     return Array.from(this.scores.values());
   }
 
+  getDisabledDexes(): string[] {
+    return Array.from(this.disabledDexes);
+  }
+
+  getQuarantinedDexes(): string[] {
+    return Array.from(this.quarantinedDexes);
+  }
+
   logHealth(): void {
     const scores = this.check();
     for (const s of scores) {
       const icon = s.state === "OK" ? "✅" : s.state === "DEGRADED" ? "⚠️" : "❌";
-      const note = s.state === "DISABLED" ? " DISABLED" : "";
+      const note = s.state === "DISABLED" ? " DISABLED" : s.state === "DEGRADED" ? " QUARANTINED" : "";
       logInfo(`[DEX_HEALTH] ${icon} ${s.dex} health=${s.score.toFixed(2)}${note}`);
     }
   }
 
   clear(): void {
     this.scores.clear();
+    this.disabledDexes.clear();
+    this.quarantinedDexes.clear();
     this.lastCheck = 0;
   }
 }

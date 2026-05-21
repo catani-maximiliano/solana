@@ -358,8 +358,25 @@ export function getUniquePairs(): string[] {
   return [...new Set(POOL_REGISTRY.filter((p) => p.enabled).map((p) => p.pair))];
 }
 
-export function getPoolSummary(): string {
-  const enabled = POOL_REGISTRY.filter((p) => p.enabled);
+let cachedEnabledPools: PoolRegistryEntry[] | null = null;
+
+export function getEnabledPools(restrictToSolUsdc: boolean = false): PoolRegistryEntry[] {
+  if (cachedEnabledPools !== null && !restrictToSolUsdc) return cachedEnabledPools;
+  const filtered = POOL_REGISTRY.filter((p) => {
+    if (!p.enabled) return false;
+    if (restrictToSolUsdc && p.pair !== "SOL/USDC") return false;
+    return true;
+  });
+  if (!restrictToSolUsdc) cachedEnabledPools = filtered;
+  return filtered;
+}
+
+export function invalidatePoolCache(): void {
+  cachedEnabledPools = null;
+}
+
+export function getPoolSummary(restrictToSolUsdc?: boolean): string {
+  const enabled = getEnabledPools(restrictToSolUsdc);
   const dexes = [...new Set(enabled.map((p) => p.dex))];
   const pairs = [...new Set(enabled.map((p) => p.pair))];
   return `${enabled.length} pools, ${pairs.length} pairs, ${dexes.length} dexes (${dexes.join(", ")})`;

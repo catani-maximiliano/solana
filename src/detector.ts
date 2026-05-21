@@ -3,6 +3,7 @@ import { logInfo, logSuccess, logWarning } from "./logger";
 import { marketValidator } from "./market-validator";
 import { executableDetector, surfaceEngine, pathBuilder, ExecutableOpportunity } from "./engine";
 import { priceGraph } from "./graph";
+import { integrityEngine } from "./core/integrity";
 
 export interface LocalOpportunityCandidate {
   pair: string;
@@ -30,6 +31,12 @@ const LIQUIDITY_MIN = 1_000;
 const FRESHNESS_MAX_MS = 10_000;
 const CACHE_TTL_MS = 10_000;
 const MAX_CANDIDATES = 20;
+
+/** HIGH-QUALITY GATES for micro-capital validation */
+const HQ_NET_BPS_MIN = 5;
+const HQ_REALITY_SCORE_MIN = 60;
+const HQ_LANDING_PROB_MIN = 0.60;
+const HQ_CONFIDENCE_MIN = 0.70;
 
 function oppToCandidate(opp: ExecutableOpportunity): LocalOpportunityCandidate {
   const isTri = opp.pair.includes("→");
@@ -71,6 +78,25 @@ export function isOpportunityValid(opp: LocalOpportunityCandidate): ValidationRe
   if (quality === "BLOCKED" || quality === "FALLBACK_ONLY") {
     return { valid: false, reason: `signal quality: ${quality}` };
   }
+
+  // ═══ HIGH-QUALITY GATES in MICRO_CAPITAL mode ═══
+  const { liveMode, microCapitalMode } = require("./config").config;
+  if (liveMode || microCapitalMode) {
+    if (opp.confidence < HQ_CONFIDENCE_MIN) {
+      return { valid: false, reason: `HQ: confianza ${(opp.confidence * 100).toFixed(0)}% < ${(HQ_CONFIDENCE_MIN * 100).toFixed(0)}%` };
+    }
+    // netBps check from executable opportunity fields
+    const execOpp = executableDetector.getOpportunities().find(e => e.pair === opp.pair);
+    if (execOpp) {
+      if (execOpp.netSpreadBps < HQ_NET_BPS_MIN) {
+        return { valid: false, reason: `HQ: net ${execOpp.netSpreadBps.toFixed(1)}bps < ${HQ_NET_BPS_MIN}bps` };
+      }
+      if (execOpp.confidence < HQ_CONFIDENCE_MIN) {
+        return { valid: false, reason: `HQ: exec conf ${(execOpp.confidence * 100).toFixed(0)}% < ${(HQ_CONFIDENCE_MIN * 100).toFixed(0)}%` };
+      }
+    }
+  }
+
   return { valid: true };
 }
 

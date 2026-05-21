@@ -102,3 +102,29 @@ export interface CorruptSnapshotReport {
   data: Record<string, unknown>;
   timestamp: number;
 }
+
+export interface ExecutionRecord {
+  pair: string;
+  solIn: number;
+  solOut: number;
+  pnlSol: number;
+  success: boolean;
+  txSignature?: string;
+  latencyMs: number;
+  alphaDetectedBps?: number;
+  alphaCapturedBps?: number;
+}
+
+export interface LiveValidationStats {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  totalPnlSol: number;
+  totalAlphaDetectedBps: number;
+  totalAlphaCapturedBps: number;
+  latencyBps: number;
+  slippageBps: number;
+  bundleLossBps: number;
+  bundleWinCount: number;
+  bundleLossCount: number;
+}

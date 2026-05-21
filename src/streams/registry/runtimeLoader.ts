@@ -4,7 +4,7 @@ import { routeEvent } from "./eventRouter";
 import { TopicConfig, RegistryState } from "./eventTypes";
 import { logInfo, logSuccess, logWarning } from "../../logger";
 
-const API_KEY = process.env.SOLANA_API_KEY || "sk_live_WyFos0McoGTo53GhVpaDXqS9FYT0QuZy";
+const API_KEY = process.env.SOLANA_API_KEY || "";
 
 let currentTopics: TopicConfig[] = [];
 let eventTimestamps: number[] = [];

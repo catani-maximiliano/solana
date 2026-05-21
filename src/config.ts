@@ -29,6 +29,20 @@ export interface BotConfig {
   walletPublicKey: string;
   marketProviders: MarketDataProvider[];
   directPoolProviders: DexPoolReader[];
+
+  // ═══ LIVE EXECUTION MODE ═══
+  liveMode: boolean;
+  microCapitalMode: boolean;
+  microCapitalPerTradeSol: number;
+  microCapitalMaxConcurrent: number;
+
+  // ═══ UNIVERSE FILTER ═══
+  restrictToSolUsdc: boolean;
+
+  // ═══ FEATURE TOGGLES ═══
+  enableFlowScore: boolean;
+  enableTriangular: boolean;
+  enableMultiHop: boolean;
 }
 
 function requireEnv(name: string): string {
@@ -79,7 +93,6 @@ function loadConfig(): BotConfig {
   const rpcUrl = process.env.SOLANA_RPC_URL || process.env.RPC_URL || requireEnv("RPC_URL");
 
   const minProfitUsd = requireNumber("MIN_PROFIT_USD", 0.05);
-  const maxTradeSol = requireNumber("MAX_TRADE_SOL", 0.1);
   const slippageBps = requireNumber("SLIPPAGE_BPS", 50);
   const checkIntervalMs = requireNumber("CHECK_INTERVAL_MS", 3000);
   const maxQuoteAgeMs = requireNumber("MAX_QUOTE_AGE_MS", 1500);
@@ -92,10 +105,20 @@ function loadConfig(): BotConfig {
   const scanMinGrossSpreadBps = requireNumber("SCAN_MIN_GROSS_SPREAD_BPS", 0);
   const enableMeteora = requireBool("ENABLE_METEORA", true);
 
-  const dryRun = process.env.DRY_RUN !== "false";
+  const liveMode = requireBool("LIVE_MODE", false);
+  const microCapitalMode = requireBool("MICRO_CAPITAL_MODE", false);
+  const microCapitalPerTradeSol = requireNumber("MICRO_CAPITAL_PER_TRADE_SOL", 0.005);
+  const microCapitalMaxConcurrent = requireNumber("MICRO_CAPITAL_MAX_CONCURRENT", 1);
+  const restrictToSolUsdc = requireBool("RESTRICT_TO_SOL_USDC", microCapitalMode);
+
+  const dryRun = liveMode ? false : process.env.DRY_RUN !== "false";
   const debugMode = requireBool("DEBUG_MODE", false);
-  const scanEnableTriangular = requireBool("SCAN_ENABLE_TRIANGULAR", true);
-  const quoteSizesSol = parseSizes("QUOTE_SIZES", [0.05, 0.1]);
+  const scanEnableTriangular = requireBool("SCAN_ENABLE_TRIANGULAR", !liveMode);
+  const enableFlowScore = requireBool("ENABLE_FLOW_SCORE", !liveMode);
+  const enableMultiHop = requireBool("ENABLE_MULTI_HOP", !liveMode);
+
+  const maxTradeSol = microCapitalMode ? microCapitalPerTradeSol : requireNumber("MAX_TRADE_SOL", 0.1);
+  const quoteSizesSol = microCapitalMode ? [microCapitalPerTradeSol] : parseSizes("QUOTE_SIZES", [0.05, 0.1]);
 
   const keypair = loadKeypair(privateKey) || Keypair.generate();
   const walletPublicKey = keypair.publicKey.toBase58();
@@ -117,6 +140,9 @@ function loadConfig(): BotConfig {
     connection, keypair, walletPublicKey,
     marketProviders: [jupiterProvider],
     directPoolProviders: poolProviders,
+    liveMode, microCapitalMode, microCapitalPerTradeSol, microCapitalMaxConcurrent,
+    restrictToSolUsdc,
+    enableFlowScore, enableTriangular: scanEnableTriangular, enableMultiHop,
   };
 
   console.log("Configuración cargada:");
@@ -139,10 +165,18 @@ function loadConfig(): BotConfig {
   console.log(`   DEBUG MODE:          ${debugMode ? "ON" : "OFF"}`);
   console.log(`   Market Providers:    [${config.marketProviders.map((p) => p.name).join(", ")}]`);
   console.log(`   Direct Pool Readers: [${config.directPoolProviders.map((p) => p.dexName).join(", ")}]`);
+  console.log(`   LIVE MODE:           ${liveMode ? "ACTIVO" : "DESACTIVADO"}`);
+  console.log(`   MICRO CAPITAL:       ${microCapitalMode ? `ACTIVO (${microCapitalPerTradeSol} SOL/trade, max ${microCapitalMaxConcurrent} concurrentes)` : "DESACTIVADO"}`);
+  console.log(`   RESTRICT SOL/USDC:   ${restrictToSolUsdc ? "ON" : "OFF"}`);
+  console.log(`   ENABLE FLOW SCORE:   ${enableFlowScore ? "ON" : "OFF"}`);
+  console.log(`   ENABLE MULTI-HOP:    ${enableMultiHop ? "ON" : "OFF"}`);
   console.log(`   DRY RUN:             ${dryRun ? "ACTIVADO" : "DESACTIVADO"}`);
 
-  if (!dryRun) {
-    console.error("\nADVERTENCIA: DRY_RUN ESTÁ DESACTIVADO\n");
+  if (!dryRun && liveMode) {
+    console.error("\n⚠️  LIVE MODE ACTIVO — SE ENVIARÁN TRANSACCIONES REALES\n");
+  }
+  if (liveMode && microCapitalMode) {
+    console.log(`\n🔬 MICRO-CAPITAL VALIDATION MODE — ${microCapitalPerTradeSol} SOL máximo por trade, ${microCapitalMaxConcurrent} simultáneo(s)\n`);
   }
 
   return config;

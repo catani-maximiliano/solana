@@ -12,6 +12,8 @@ import { eventBus } from "../events";
 import { marketValidator } from "../market-validator";
 import { profitLedger } from "./profit-ledger";
 import { paperExecution } from "./paper-execution";
+import { integrityEngine } from "../core/integrity";
+import { config } from "../config";
 
 const MIN_NET_SPREAD_BPS = 0.3;
 const MAX_CANDIDATES = 20;
@@ -20,10 +22,18 @@ const MIN_CONFIDENCE = 0.25;
 const MAX_SLOT_LAG = 15;
 const STALE_AGE_MS = 8_000;
 const SOL_PRICE_USD = 160;
-const PERSISTENCE_WINDOW_MS = 1_500; // route must survive 1.5s before executable
-const SIMULATED_LATENCY_MS = 2_000; // simulated execution delay
-const SLIPPAGE_DECAY_PER_SEC = 0.3; // 30% of slippage added per second of latency
-const WARMUP_MS = 45_000; // no executable promotion during first 45s (bootstrap stability)
+const PERSISTENCE_WINDOW_MS = 1_500;
+const SIMULATED_LATENCY_MS = 2_000;
+const SLIPPAGE_DECAY_PER_SEC = 0.3;
+const WARMUP_MS = 45_000;
+
+// Per-DEX max age limits
+const DEX_MAX_AGE: Record<string, number> = {
+  Whirlpool: 5000,
+  "Raydium CLMM": 3000,
+  Raydium: 3000,
+  Meteora: 3000,
+};
 const STARTUP_TIME = Date.now();
 
 export class ExecutableDetector {
@@ -114,6 +124,28 @@ export class ExecutableDetector {
       }
       if (report.executableSpreadBps < MIN_NET_SPREAD_BPS) continue;
 
+      // ═══ INTEGRITY HARD GATES — reject entire pair if any pool fails ═══
+      const execGraph = integrityEngine.executionGraphBuilder;
+      const integ = integrityEngine.spreadIntegrityValidator;
+
+      // Ensure execution graph has been computed
+      if (execGraph.getExecutionEdgeCount() === 0) {
+        logDebug(`Executable: SKIP ${label} — execution graph empty`);
+        continue;
+      }
+
+      // Per-DEX age limits for all pools in this surface
+      let allFresh = true;
+      for (const p of report.pools) {
+        const maxAge = DEX_MAX_AGE[p.dex] ?? 5000;
+        if (p.age > maxAge) {
+          logDebug(`Executable: SKIP ${label} — ${p.dex} pool aged ${(p.age / 1000).toFixed(1)}s > ${maxAge}ms limit`);
+          allFresh = false;
+          break;
+        }
+      }
+      if (!allFresh) continue;
+
       for (let i = 0; i < report.pools.length; i++) {
         for (let j = i + 1; j < report.pools.length; j++) {
           const a = report.pools[i];
@@ -123,6 +155,26 @@ export class ExecutableDetector {
 
           if (buy.age > STALE_AGE_MS || sell.age > STALE_AGE_MS) continue;
           if (Math.abs(buy.slot - sell.slot) > MAX_SLOT_LAG) continue;
+
+          // ═══ INTEGRITY HARD GATE: both pools must be in execution graph ═══
+          if (!execGraph.hasExecutionEdge(buy.poolAddress)) {
+            logDebug(`Executable: SKIP ${label} — buy pool ${buy.poolAddress.substring(0, 8)}... not in execution graph`);
+            continue;
+          }
+          if (!execGraph.hasExecutionEdge(sell.poolAddress)) {
+            logDebug(`Executable: SKIP ${label} — sell pool ${sell.poolAddress.substring(0, 8)}... not in execution graph`);
+            continue;
+          }
+
+          // ═══ SPREAD INTEGRITY VALIDATION === same-dex + freshness + slot + confidence ═══
+          const integValid = integ.validate(
+            { poolAddress: buy.poolAddress, dex: buy.dex, price: buy.price, liquidity: buy.liquidity, ageMs: buy.age, slotDelta: Math.abs(buy.slot - sell.slot), slot: buy.slot },
+            { poolAddress: sell.poolAddress, dex: sell.dex, price: sell.price, liquidity: sell.liquidity, ageMs: sell.age, slotDelta: Math.abs(buy.slot - sell.slot), slot: sell.slot },
+          );
+          if (!integValid.valid) {
+            logDebug(`Executable: SKIP ${label} — integrity fail: ${integValid.reason}`);
+            continue;
+          }
 
           const optimal = slippageEstimator.findOptimalTrade(buy.poolAddress, sell.poolAddress);
           if (optimal.netProfit <= 0 || !optimal.buySim.executable || !optimal.sellSim.executable) {
@@ -204,7 +256,8 @@ export class ExecutableDetector {
     }
 
     // ── Multi-hop candidates from spreadEngine (every scan) ──
-    const multiHopCandidates = spreadEngine.getMultiHopCandidates();
+    const multiHopCandidates = (config.liveMode || config.microCapitalMode || !config.enableMultiHop)
+      ? [] : spreadEngine.getMultiHopCandidates();
     logDebug(`Executable: ${multiHopCandidates.length} multi-hop candidates received`);
     if (multiHopCandidates.length > 0) {
       for (const mh of multiHopCandidates) {
@@ -404,9 +457,13 @@ export class ExecutableDetector {
       logDebug(`Executable: all ${multiHopCandidates.filter(mh => mh.netBps > 0).length} profitable multi-hop route(s) successfully promoted`);
     }
 
-    // ── Triangular path detection (every 3rd scan) ──
-    this.triangularScanCounter++;
-    if (this.triangularScanCounter % 3 === 0) {
+    // ── Triangular path detection (disabled in LIVE/MICRO_CAPITAL mode) ──
+    if (config.liveMode || config.microCapitalMode) {
+      this.triangularScanCounter = 0;
+    } else {
+      this.triangularScanCounter++;
+    }
+    if (this.triangularScanCounter > 0 && this.triangularScanCounter % 3 === 0) {
       const triResult = pathBuilder.enumerateTriangularPaths();
       this.lastTriangularResult = triResult;
 

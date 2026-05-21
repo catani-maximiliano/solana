@@ -2,7 +2,6 @@ import { PoolState } from "./types";
 import { priceGraph } from "../../graph";
 import { marketState } from "../../market/state-cache";
 import { poolFreshnessTracker } from "./poolFreshnessTracker";
-import { executionGraphFilter } from "./executionGraphFilter";
 import { logWarning, logInfo } from "../../logger";
 
 const CHECK_INTERVAL_MS = 3000;
