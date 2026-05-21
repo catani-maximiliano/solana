@@ -27,6 +27,7 @@ import { stateConsistency } from "./state-consistency";
 import { Scanner, tokenDiscovery, quoteEngine } from "./scanner";
 import { validatePoolFields as validateWsFields } from "./market/account-validator";
 import { accountMetrics } from "./market/account-metrics";
+import { integrityEngine } from "./core/integrity";
 
 let wsManager: WebSocketManager | null = null;
 let scanner: Scanner | null = null;
@@ -365,6 +366,11 @@ async function initialize(): Promise<boolean> {
 
     logInfo(`Graph bootstrapped: ${priceGraph.getNodeCount()} nodes, ${priceGraph.getEdgeCount()} edges`);
 
+    integrityEngine.start();
+    for (const provider of config.directPoolProviders) {
+      integrityEngine.registerDex(provider.dexName);
+    }
+
     // Start NLN event-driven engine
     startEventDrivenEngine();
 
@@ -384,6 +390,7 @@ async function initialize(): Promise<boolean> {
       const pool = marketState.getPool(data.poolAddress);
       if (pool) {
         priceGraph.updateFromPool(pool);
+        integrityEngine.onSnapshotReceived(pool);
         logDebug(`EventBus → Graph: ✅ ${pool.poolAddress.substring(0, 8)}... updated (${priceGraph.getNodeCount()} nodes, ${priceGraph.getEdgeCount()} edges)`);
       } else {
         logDebug(`EventBus → Graph: pool ${data.poolAddress.substring(0, 8)}... not in cache yet`);
@@ -392,6 +399,13 @@ async function initialize(): Promise<boolean> {
   });
 
   spreadEngine.start();
+
+  integrityEngine.start();
+  for (const provider of config.directPoolProviders) {
+    integrityEngine.registerDex(provider.dexName);
+  }
+  logInfo(`IntegrityEngine: ${config.directPoolProviders.length} DEXes registered`);
+
   eventScheduler.enableWatchdog(wsManager ?? undefined);
 
   const dataOk = await verifyMarketCache(12000);
@@ -591,6 +605,8 @@ async function mainLoop(): Promise<void> {
         stateConsistency.printReport(consistencyReport);
 
         accountMetrics.printSummary();
+
+        integrityEngine.cycle();
 
         if (priceGraph.getEdgeCount() > 0) {
           priceGraph.printGraphSummary();
