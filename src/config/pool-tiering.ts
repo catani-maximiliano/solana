@@ -1,3 +1,5 @@
+import { ALLOWED_POOLS, ExecutionGrade, DISABLED_POOLS } from "./execution-grade-pools";
+
 export enum PoolTier {
   TIER_1 = "TIER_1",
   TIER_2 = "TIER_2",
@@ -11,13 +13,24 @@ export interface PoolTierInfo {
   reason?: string;
 }
 
-export const POOL_TIER_MAP: Record<string, PoolTierInfo> = {
-  "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE": { address: "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE", label: "Whirlpool ts=4 (primary)", tier: PoolTier.TIER_1 },
-  "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ": { address: "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ", label: "Whirlpool ts=64 (secondary)", tier: PoolTier.TIER_1 },
-  "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj": { address: "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj", label: "Raydium CLMM ts=1 (primary)", tier: PoolTier.TIER_1 },
-  "2QdhepnKRTLjjSqPL1PtKNwqrUkoLee5Gqs8bvZhRdMv": { address: "2QdhepnKRTLjjSqPL1PtKNwqrUkoLee5Gqs8bvZhRdMv", label: "Raydium CLMM ts=8", tier: PoolTier.TIER_2 },
-  "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv": { address: "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv", label: "Raydium CLMM (legacy ts=1)", tier: PoolTier.DISABLED, reason: "low activity, duplicate of 8sLbNZoA" },
-};
+export const POOL_TIER_MAP: Record<string, PoolTierInfo> = {};
+
+for (const p of ALLOWED_POOLS) {
+  POOL_TIER_MAP[p.address] = {
+    address: p.address,
+    label: `${p.dex} ${p.symbolA}/${p.symbolB} (${p.grade === ExecutionGrade.PRIMARY ? "primary" : "secondary"})`,
+    tier: p.grade === ExecutionGrade.PRIMARY ? PoolTier.TIER_1 : PoolTier.TIER_2,
+  };
+}
+
+for (const addr of DISABLED_POOLS) {
+  POOL_TIER_MAP[addr] = {
+    address: addr,
+    label: `${addr.substring(0, 8)}...`,
+    tier: PoolTier.DISABLED,
+    reason: "SECONDARY_OR_STALE_POOL",
+  };
+}
 
 export function getPoolTier(address: string): PoolTier {
   return POOL_TIER_MAP[address]?.tier ?? PoolTier.DISABLED;

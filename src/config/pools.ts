@@ -1,6 +1,10 @@
+import { ALLOWED_POOLS, DISABLED_POOLS, isExecutionGradePool, isDisabledPool } from "./execution-grade-pools";
+
 export const TOKEN_MINTS: Record<string, number> = {
   "So11111111111111111111111111111111111111112": 9,   // SOL
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": 6, // USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": 6, // USDT
+  "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": 6, // RAY
 };
 
 export interface PoolRegistryEntry {
@@ -22,78 +26,27 @@ export interface PoolRegistryEntry {
   tier: number;
 }
 
-export const POOL_REGISTRY: PoolRegistryEntry[] = [
-  // ════════════════════════════════════════════════════════════════
-  // EXECUTION-GRADE — SOL/USDC pools with real HFT activity
-  // ════════════════════════════════════════════════════════════════
+// Execution-grade pool universe — built from allowlist
+export const POOL_REGISTRY: PoolRegistryEntry[] = ALLOWED_POOLS.map(p => ({
+  address: p.address,
+  pair: p.pair,
+  dex: p.dex,
+  type: p.type,
+  programKey: p.programKey,
+  mintA: p.mintA,
+  mintB: p.mintB,
+  symbolA: p.symbolA,
+  symbolB: p.symbolB,
+  decimalsA: p.decimalsA,
+  decimalsB: p.decimalsB,
+  tickSpacing: p.tickSpacing,
+  feeBps: p.feeBps,
+  verified: true,
+  enabled: true,
+  tier: p.grade === "EXECUTION_GRADE" ? 1 : 2,
+}));
 
-  // SOL/USDC — Orca Whirlpool ts=4 — $23-30M TVL — PRIMARY
-  {
-    address: "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE",
-    pair: "SOL/USDC",
-    dex: "Whirlpool",
-    type: "clmm",
-    programKey: "whirlpool",
-    mintA: "So11111111111111111111111111111111111111112",
-    mintB: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    symbolA: "SOL",
-    symbolB: "USDC",
-    decimalsA: 9,
-    decimalsB: 6,
-    tickSpacing: 4,
-    feeBps: 4,
-    verified: true,
-    enabled: true,
-    tier: 1,
-  },
-
-  // SOL/USDC — Raydium CLMM ts=1 — $5.27M TVL — PRIMARY
-  {
-    address: "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
-    pair: "SOL/USDC",
-    dex: "Raydium CLMM",
-    type: "clmm",
-    programKey: "raydiumClmm",
-    mintA: "So11111111111111111111111111111111111111112",
-    mintB: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    symbolA: "SOL",
-    symbolB: "USDC",
-    decimalsA: 9,
-    decimalsB: 6,
-    tickSpacing: 1,
-    feeBps: 1,
-    verified: true,
-    enabled: true,
-    tier: 1,
-  },
-
-  // SOL/USDC — Raydium CLMM (legacy) — $2.1M TVL — SECONDARY
-  {
-    address: "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
-    pair: "SOL/USDC",
-    dex: "Raydium CLMM",
-    type: "clmm",
-    programKey: "raydiumClmm",
-    mintA: "So11111111111111111111111111111111111111112",
-    mintB: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    symbolA: "SOL",
-    symbolB: "USDC",
-    decimalsA: 9,
-    decimalsB: 6,
-    tickSpacing: 1,
-    feeBps: 5,
-    verified: true,
-    enabled: true,
-    tier: 1,
-  },
-];
-
-// ── Blacklist: pools that must NEVER be subscribed or used ──
-export const POOL_BLACKLIST: string[] = [
-  "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ", // Whirlpool ts=64 1bps — low activity $200K TVL, stale >100s
-  "2QdhepnKRTLjjSqPL1PtKNwqrUkoLee5Gqs8bvZhRdMv", // SOL/USDC Raydium ts=8 — low activity $522K TVL
-  "CYbD9RaToYMtWKA7QZyoLahnHdWq553Vm62Lh6qWtuxq", // SOL/USDC — 25bps stale
-];
+export const POOL_BLACKLIST: string[] = [...DISABLED_POOLS];
 
 export function getPoolsByDex(dex: string): PoolRegistryEntry[] {
   return POOL_REGISTRY.filter((p) => p.dex === dex && p.enabled);

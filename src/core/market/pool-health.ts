@@ -16,6 +16,9 @@ interface PoolHealthData {
   disabledReason?: string;
   lastUpdateTime: number;
   lastEnabledTime: number;
+  executionAttempts: number;
+  executionSuccesses: number;
+  executionFailures: number;
 }
 
 export type ExecutionGrade = "EXECUTION" | "DEGRADED" | "DEAD_POOL";
@@ -30,6 +33,10 @@ export interface PoolHealthReport {
   grade: ExecutionGrade;
   disabled: boolean;
   disabledReason?: string;
+  execAttempts: number;
+  execSuccesses: number;
+  execFailures: number;
+  execSuccessRate: number;
 }
 
 export class PoolHealthTracker {
@@ -39,7 +46,7 @@ export class PoolHealthTracker {
     const now = Date.now();
     let d = this.data.get(poolAddress);
     if (!d) {
-      d = { poolAddress, dex, updates: [], ages: [], staleCount: 0, totalCount: 0, disabled: false, lastUpdateTime: now, lastEnabledTime: now };
+      d = { poolAddress, dex, updates: [], ages: [], staleCount: 0, totalCount: 0, disabled: false, lastUpdateTime: now, lastEnabledTime: now, executionAttempts: 0, executionSuccesses: 0, executionFailures: 0 };
       this.data.set(poolAddress, d);
     }
 
@@ -66,6 +73,27 @@ export class PoolHealthTracker {
     }
   }
 
+  recordExecutionAttempt(poolAddress: string): void {
+    const d = this.data.get(poolAddress);
+    if (d) d.executionAttempts++;
+  }
+
+  recordExecutionSuccess(poolAddress: string): void {
+    const d = this.data.get(poolAddress);
+    if (d) {
+      d.executionSuccesses++;
+      d.executionFailures = d.executionAttempts - d.executionSuccesses;
+    }
+  }
+
+  recordExecutionFailure(poolAddress: string): void {
+    const d = this.data.get(poolAddress);
+    if (d) {
+      d.executionFailures++;
+      d.executionAttempts++;
+    }
+  }
+
   computeReport(poolAddress: string): PoolHealthReport | null {
     const d = this.data.get(poolAddress);
     if (!d) return null;
@@ -84,8 +112,10 @@ export class PoolHealthTracker {
     const staleScore = 100 - staleRate;
     const score = Math.round((ageScore * 0.3 + freqScore * 0.4 + staleScore * 0.3));
 
+    const execSuccessRate = d.executionAttempts > 0 ? (d.executionSuccesses / d.executionAttempts) * 100 : 0;
+
     const grade: ExecutionGrade =
-      updatesPerMin >= 30 && avgAge < 1000 && staleRate < 5 ? "EXECUTION"
+      updatesPerMin >= 30 && avgAge < 1000 && staleRate < 5 && execSuccessRate >= 50 ? "EXECUTION"
       : updatesPerMin >= 5 ? "DEGRADED"
       : "DEAD_POOL";
 
@@ -99,6 +129,10 @@ export class PoolHealthTracker {
       grade,
       disabled: d.disabled,
       disabledReason: d.disabledReason,
+      execAttempts: d.executionAttempts,
+      execSuccesses: d.executionSuccesses,
+      execFailures: d.executionFailures,
+      execSuccessRate: Math.round(execSuccessRate * 10) / 10,
     };
   }
 
@@ -133,12 +167,12 @@ export class PoolHealthTracker {
     if (reports.length === 0) return;
     for (const r of reports) {
       console.log(`  [POOL_HEALTH] ${r.dex} ${r.poolAddress.substring(0, 8)}...`);
-      console.log(`    updates=${r.updatesPerMin}/min  avgAge=${r.avgAgeMs}ms  stale=${r.staleRatePct}%  grade=${r.grade}`);
+      console.log(`    updates=${r.updatesPerMin}/min  avgAge=${r.avgAgeMs}ms  stale=${r.staleRatePct}%  grade=${r.grade}  exec=${r.execSuccesses}/${r.execAttempts}`);
       if (r.disabled) {
         console.log(`  [POOL_DISABLED] ${r.poolAddress.substring(0, 8)}... disabled: ${r.disabledReason}`);
       }
     }
-    poolQualityRegistry.printFakeAlphaDashboard();
+    poolQualityRegistry.printPoolUniverseDashboard();
   }
 
   reset(): void {

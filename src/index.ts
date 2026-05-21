@@ -30,6 +30,7 @@ import { accountMetrics } from "./market/account-metrics";
 import { integrityEngine } from "./core/integrity";
 import { poolHealthTracker } from "./core/market/pool-health";
 import { poolQualityRegistry } from "./core/pools/poolQualityRegistry";
+import { getExecutionGradePools, isDisabledPool, ExecutionGrade } from "./config/execution-grade-pools";
 
 let wsManager: WebSocketManager | null = null;
 let scanner: Scanner | null = null;
@@ -100,15 +101,22 @@ async function startProviders(): Promise<void> {
 async function subscribePools(): Promise<number> {
   logInfo("Paso 5: Subscribiendo pools...");
 
-  // Restrict universe if configured
-  const activePools = config.restrictToSolUsdc
-    ? POOL_REGISTRY.filter(p => p.enabled && p.pair === "SOL/USDC")
-    : POOL_REGISTRY.filter(p => p.enabled);
+  // Execution-grade universe — hardcoded allowlist in LIVE_MODE
+  const activePools = config.liveMode
+    ? getExecutionGradePools(!config.restrictToSolUsdc).filter(p => !isDisabledPool(p.address))
+    : config.restrictToSolUsdc
+      ? POOL_REGISTRY.filter(p => p.enabled && p.pair === "SOL/USDC")
+      : POOL_REGISTRY.filter(p => p.enabled);
+
+  const execGradeCount = activePools.filter(p => (p as any).grade === undefined || (p as any).grade === "EXECUTION_GRADE").length;
+  const secondaryCount = activePools.length - execGradeCount;
 
   if (activePools.length === 0) {
     logWarning("  Active pool list vacío — no hay pools para subscribir");
     return 0;
   }
+
+  logInfo(`  Universe: ${execGradeCount} primary + ${secondaryCount} secondary = ${activePools.length} execution-grade pools`);
 
   for (const entry of activePools) {
     pairState.registerPool(entry.pair, entry.address);

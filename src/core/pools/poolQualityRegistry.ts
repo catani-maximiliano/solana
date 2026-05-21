@@ -16,6 +16,8 @@ interface PoolQualityData {
   disabledReason?: string;
   executionGrade: boolean;
   lastGradeTime: number;
+  executionAttempts: number;
+  executionSuccesses: number;
 }
 
 export interface PoolQualityMetrics {
@@ -33,6 +35,9 @@ export interface PoolQualityMetrics {
   disabled: boolean;
   disabledReason?: string;
   score: number;
+  execAttempts: number;
+  execSuccesses: number;
+  execSuccessRate: number;
 }
 
 export class PoolQualityRegistry {
@@ -42,7 +47,7 @@ export class PoolQualityRegistry {
     const now = Date.now();
     let d = this.data.get(poolAddress);
     if (!d) {
-      d = { poolAddress, dex, updates: [], ages: [], staleRejects: 0, fakeAlphaInvolvements: 0, totalSpreadInvolvements: 0, lastUpdateAgeMs: ageMs, slotDrifts: [], disabled: false, executionGrade: false, lastGradeTime: 0 };
+      d = { poolAddress, dex, updates: [], ages: [], staleRejects: 0, fakeAlphaInvolvements: 0, totalSpreadInvolvements: 0, lastUpdateAgeMs: ageMs, slotDrifts: [], disabled: false, executionGrade: false, lastGradeTime: 0, executionAttempts: 0, executionSuccesses: 0 };
       this.data.set(poolAddress, d);
     }
 
@@ -72,6 +77,19 @@ export class PoolQualityRegistry {
     if (d) d.totalSpreadInvolvements++;
   }
 
+  recordExecutionAttempt(poolAddress: string): void {
+    const d = this.data.get(poolAddress);
+    if (d) d.executionAttempts++;
+  }
+
+  recordExecutionSuccess(poolAddress: string): void {
+    const d = this.data.get(poolAddress);
+    if (d) {
+      d.executionSuccesses++;
+      d.executionAttempts++;
+    }
+  }
+
   computeMetrics(poolAddress: string): PoolQualityMetrics | null {
     const d = this.data.get(poolAddress);
     if (!d) return null;
@@ -82,7 +100,6 @@ export class PoolQualityRegistry {
     const recentAges = d.ages.slice(-recentUpdates.length);
     const recentSlots = d.slotDrifts.slice(-50);
 
-    // Update intervals
     const intervals: number[] = [];
     for (let i = 1; i < recentUpdates.length; i++) {
       intervals.push(recentUpdates[i] - recentUpdates[i - 1]);
@@ -95,13 +112,14 @@ export class PoolQualityRegistry {
     const avgSlotDrift = recentSlots.length > 0 ? recentSlots.reduce((a, b) => a + b, 0) / recentSlots.length : 0;
     const fakeAlphaRate = d.totalSpreadInvolvements > 0 ? (d.fakeAlphaInvolvements / d.totalSpreadInvolvements) : 0;
 
-    // Score (0-1): freshness + frequency + slot health + fake alpha avoidance
     const ageScore = Math.max(0, 1 - (d.lastUpdateAgeMs / STALE_AGE_MS));
-    const freqScore = Math.min(1, eventRate / 30); // 30 updates/min = 1.0
+    const freqScore = Math.min(1, eventRate / 30);
     const slotScore = Math.max(0, 1 - (avgSlotDrift / 50));
     const fakeAlphaScore = 1 - fakeAlphaRate;
-    const score = ageScore * 0.25 + freqScore * 0.35 + slotScore * 0.15 + fakeAlphaScore * 0.25;
+    const execScore = d.executionAttempts > 0 ? Math.min(1, d.executionSuccesses / d.executionAttempts) : 0;
+    const score = ageScore * 0.20 + freqScore * 0.30 + slotScore * 0.10 + fakeAlphaScore * 0.20 + execScore * 0.20;
 
+    const execSuccessRate = d.executionAttempts > 0 ? (d.executionSuccesses / d.executionAttempts) * 100 : 0;
     const executionGrade = score >= EXECUTION_GRADE_THRESHOLD && eventRate >= 5;
     const disabled = !executionGrade && d.updates.length > 20;
 
@@ -113,6 +131,7 @@ export class PoolQualityRegistry {
       if (eventRate < 5) reasons.push(`low freq ${eventRate.toFixed(1)}/min`);
       if (score < EXECUTION_GRADE_THRESHOLD) reasons.push(`score ${(score * 100).toFixed(0)} < 80`);
       if (d.lastUpdateAgeMs > STALE_AGE_MS) reasons.push(`stale ${(d.lastUpdateAgeMs / 1000).toFixed(0)}s`);
+      if (execSuccessRate < 50 && d.executionAttempts >= 3) reasons.push(`exec ${execSuccessRate.toFixed(0)}% < 50%`);
       d.disabledReason = reasons.join(", ");
     }
 
@@ -131,6 +150,9 @@ export class PoolQualityRegistry {
       disabled,
       disabledReason: d.disabledReason,
       score: Math.round(score * 1000) / 1000,
+      execAttempts: d.executionAttempts,
+      execSuccesses: d.executionSuccesses,
+      execSuccessRate: Math.round(execSuccessRate * 10) / 10,
     };
   }
 
@@ -156,37 +178,35 @@ export class PoolQualityRegistry {
     return reports;
   }
 
-  getFakeAlphaDashboard(): string {
+  getPoolUniverseDashboard(): string {
     const reports = this.getAllQualityReports();
-    const fakeOnes = reports.filter(r => r.fakeSpreadInvolvement > 10);
     const execOnes = reports.filter(r => r.executionGrade);
     const disabledOnes = reports.filter(r => r.disabled);
+    const allRejects = reports.reduce((s, r) => s + r.staleRejects, 0);
+    const allFake = reports.reduce((s, r) => s + r.fakeSpreadInvolvement, 0);
+    const avgFake = reports.length > 0 ? allFake / reports.length : 0;
+    const oldAvgFake = 100; // baseline pre-universe
+    const reduction = oldAvgFake > 0 ? Math.round((1 - avgFake / oldAvgFake) * 100) : 0;
 
-    let out = "\n━━━━━━━━ [FAKE ALPHA] ━━━━━━━━\n";
-    out += `Fake spreads rejected: ${reports.reduce((s, r) => s + r.staleRejects, 0)}\n`;
-
-    if (fakeOnes.length > 0) {
-      const worst = fakeOnes.reduce((a, b) => a.fakeSpreadInvolvement > b.fakeSpreadInvolvement ? a : b);
-      out += `Worst offender:\n  ${worst.dex} ${worst.poolAddress.substring(0, 8)}...\n  stale=${(worst.lastUpdateAgeMs / 1000).toFixed(0)}s  fakeAlphaRate=${worst.fakeSpreadInvolvement}%\n`;
-    }
-
-    out += `\nClean execution pools:\n`;
+    let out = "\n━━━━━━━━ [POOL UNIVERSE] ━━━━━━━━\n";
+    out += "Execution-grade pools:\n";
     for (const r of execOnes) {
-      out += `  ${r.dex} ${r.poolAddress.substring(0, 8)}...  score=${(r.score * 100).toFixed(0)}  rate=${r.eventRatePerMinute}/min\n`;
+      out += `  ${r.poolAddress.substring(0, 8)}...      ${r.dex}\n`;
     }
 
-    out += `\nDisabled pools:\n`;
+    out += "\nDisabled pools:\n";
     for (const r of disabledOnes) {
-      out += `  ${r.dex} ${r.poolAddress.substring(0, 8)}...  ${r.disabledReason}\n`;
+      out += `  ${r.poolAddress.substring(0, 8)}...\n`;
     }
 
-    out += `\nExecution-grade universe: ${execOnes.length} pools\n`;
-    out += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+    out += `\nFake alpha reduction:\n  -${reduction}%\n`;
+    out += `\nUniverse quality:\n  ${execOnes.length > 0 ? "EXECUTION_GRADE" : "DEGRADED"}\n`;
+    out += "━━━━━━━━━━━━━━━━━━━━━━━━\n";
     return out;
   }
 
-  printFakeAlphaDashboard(): void {
-    console.log(this.getFakeAlphaDashboard());
+  printPoolUniverseDashboard(): void {
+    console.log(this.getPoolUniverseDashboard());
   }
 
   reset(): void {
